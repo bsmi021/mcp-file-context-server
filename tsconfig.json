@@ -1,0 +1,28 @@
+{
+    "compilerOptions": {
+        "skipLibCheck": true,
+        "target": "ES2022",
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "esModuleInterop": true,
+        "outDir": "./build",
+        "rootDir": "./src",
+        "strict": true,
+        "declaration": true,
+        "sourceMap": true,
+        "resolveJsonModule": true,
+        "allowJs": true,
+        "paths": {
+            "@typescript-eslint/*": [
+                "./node_modules/@typescript-eslint/*"
+            ]
+        }
+    },
+    "include": [
+        "src/**/*"
+    ],
+    "exclude": [
+        "node_modules",
+        "build"
+    ]
+}
