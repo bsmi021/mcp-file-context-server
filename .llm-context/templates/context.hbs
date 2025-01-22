@@ -1,0 +1,37 @@
+{{#if prompt}}
+{{{prompt}}}
+{{/if}}
+{{#if project_notes}}
+{{{project_notes}}}
+{{/if}}
+{{#if user_notes}}
+{{{user_notes}}}
+{{/if}}
+# Repository Content: **{{project_name}}**
+
+> Generation timestamp: {{timestamp}}  
+> Use lc-list-modified-files tool to track changes since generation
+
+{{#if sample_requested_files}}
+## File Access Instructions
+
+Missing/incomplete files (marked "✓" or "○" in the repository structure) can be retrieved using the lc-get-files tool.
+{{/if}}
+
+## Repository Structure
+
+```
+{{{folder_structure_diagram}}}
+```
+
+{{#if files}}
+## Current Files
+
+{{> files}}
+{{/if}}
+
+{{#if highlights}}
+## Code Outlines
+
+{{> highlights}}
+{{/if}}

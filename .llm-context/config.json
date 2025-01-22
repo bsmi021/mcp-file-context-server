@@ -1,0 +1,121 @@
+{
+  "templates": {
+    "context": "context.j2",
+    "files": "files.j2",
+    "highlights": "highlights.j2"
+  },
+  "profiles": {
+    "code": {
+      "gitignores": {
+        "full_files": [
+          ".git/",
+          "node_modules/",
+          "dist/",
+          "build/",
+          ".env",
+          ".env.*",
+          "*.min.*",
+          "*.bundle.*"
+        ],
+        "outline_files": [
+          ".git/",
+          "node_modules/",
+          "dist/",
+          "build/",
+          ".env",
+          ".env.*",
+          "*.min.*",
+          "*.bundle.*"
+        ]
+      },
+      "only_includes": {
+        "full_files": [
+          "**/*"
+        ],
+        "outline_files": [
+          "**/*"
+        ]
+      },
+      "settings": {
+        "no_media": true,
+        "with_user_notes": false
+      }
+    },
+    "code-prompt": {
+      "gitignores": {
+        "full_files": [
+          ".git/",
+          "node_modules/",
+          "dist/",
+          "build/",
+          ".env",
+          ".env.*",
+          "*.min.*",
+          "*.bundle.*"
+        ],
+        "outline_files": [
+          ".git/",
+          "node_modules/",
+          "dist/",
+          "build/",
+          ".env",
+          ".env.*",
+          "*.min.*",
+          "*.bundle.*"
+        ]
+      },
+      "only_includes": {
+        "full_files": [
+          "**/*"
+        ],
+        "outline_files": [
+          "**/*"
+        ]
+      },
+      "settings": {
+        "no_media": true,
+        "with_user_notes": false
+      },
+      "base": "code",
+      "prompt": "prompt.md"
+    },
+    "code-file": {
+      "gitignores": {
+        "full_files": [
+          ".git/",
+          "node_modules/",
+          "dist/",
+          "build/",
+          ".env",
+          ".env.*",
+          "*.min.*",
+          "*.bundle.*"
+        ],
+        "outline_files": [
+          ".git/",
+          "node_modules/",
+          "dist/",
+          "build/",
+          ".env",
+          ".env.*",
+          "*.min.*",
+          "*.bundle.*"
+        ]
+      },
+      "only_includes": {
+        "full_files": [
+          "**/*"
+        ],
+        "outline_files": [
+          "**/*"
+        ]
+      },
+      "settings": {
+        "no_media": true,
+        "with_user_notes": false,
+        "context_file": "project-context.md.tmp"
+      },
+      "base": "code"
+    }
+  }
+}

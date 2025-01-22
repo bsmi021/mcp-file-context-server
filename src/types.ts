@@ -134,3 +134,46 @@ export interface CacheStats {
     hitRate: number;
     evictionCount: number;
 }
+
+export interface Profile {
+    name: string;
+    description?: string;
+    settings: {
+        no_media: boolean;
+        with_user_notes: boolean;
+        context_file?: string;
+    };
+    gitignores: {
+        full_files: string[];
+        outline_files: string[];
+    };
+    only_includes: {
+        full_files: string[];
+        outline_files: string[];
+    };
+    prompt?: string;
+}
+
+export interface ProfileState {
+    profile_name: string;
+    full_files: string[];
+    outline_files: string[];
+    excluded_files: string[];
+    timestamp: number;
+}
+
+export interface ProfileConfig {
+    profiles: Record<string, Profile>;
+    default_profile: string;
+}
+
+export interface ContextSpec {
+    profile: Profile;
+    state: ProfileState;
+}
+
+export interface FileOutline {
+    path: string;
+    outline: string;
+    metadata: FileMetadata;
+}

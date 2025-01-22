@@ -15,17 +15,31 @@ import { createReadStream, ReadStream } from 'fs';
 import { createGzip, Gzip } from 'zlib';
 import { pipeline, Transform } from 'stream';
 import { promisify } from 'util';
-import { glob as globCb } from 'glob';
-import type { IOptions } from 'glob';
-import globPkg from 'glob';
+import { glob as globAsync, type GlobOptions } from 'glob';
 import * as path from 'path';
 import * as mime from 'mime-types';
 import * as os from 'os';
-import { FileMetadata } from './types.js';
-import { FileWatcherService } from './services/FileWatcherService.js';
 import { createHash } from 'crypto';
+import {
+    FileMetadata,
+    FileContent,
+    FileEntry,
+    FileErrorCode,
+    FileOperationError,
+    SearchOptions,
+    SearchResult,
+    DirectoryContent,
+    EnhancedSearchOptions,
+    FileOutline,
+    Profile,
+    ProfileState
+} from './types.js';
+import { FileWatcherService } from './services/FileWatcherService.js';
+import { ProfileService } from './services/ProfileService.js';
+import { TemplateService } from './services/TemplateService.js';
+import { CodeAnalysisService, CodeAnalysisResult } from './services/CodeAnalysisService.js';
+import LRUCache from 'lru-cache';
 
-// Configuration interface
 interface StreamConfig {
     chunkSize: number;
     useCompression: boolean;
@@ -38,25 +52,6 @@ interface ChunkInfo {
     lastChunkSize: number;
     totalSize: number;
 }
-
-const DEFAULT_CONFIG: StreamConfig = {
-    chunkSize: 64 * 1024, // 64KB chunks
-    useCompression: false,
-    compressionLevel: 6
-};
-
-const glob = promisify(globPkg) as (pattern: string, options?: IOptions) => Promise<string[]>;
-
-import {
-    FileContent,
-    FileEntry,
-    FileErrorCode,
-    FileOperationError,
-    SearchOptions,
-    SearchResult,
-    DirectoryContent,
-    EnhancedSearchOptions
-} from './types.js';
 
 interface FileInfo {
     path: string;
@@ -111,11 +106,22 @@ const DEFAULT_IGNORE_PATTERNS = [
     '.env.*',
 ];
 
+const DEFAULT_CONFIG: StreamConfig = {
+    chunkSize: 64 * 1024, // 64KB chunks
+    useCompression: false,
+    compressionLevel: 6
+};
+
+const glob = promisify(globAsync) as (pattern: string, options?: GlobOptions) => Promise<string[]>;
+
 class FileContextServer {
     private server: Server;
     private fileWatcherService: FileWatcherService;
+    private profileService: ProfileService;
+    private templateService: TemplateService;
     private config: StreamConfig;
     private fileContentCache: Map<string, { content: string; lastModified: number }>;
+    private codeAnalysisService: CodeAnalysisService;
 
     /**
      * Create standardized file content object
@@ -253,8 +259,11 @@ class FileContextServer {
 
     constructor(config: Partial<StreamConfig> = {}) {
         this.fileWatcherService = new FileWatcherService();
+        this.profileService = new ProfileService(process.cwd());
+        this.templateService = new TemplateService(process.cwd());
         this.config = { ...DEFAULT_CONFIG, ...config };
         this.fileContentCache = new Map();
+        this.codeAnalysisService = new CodeAnalysisService();
 
         this.server = new Server(
             {
@@ -312,9 +321,9 @@ class FileContextServer {
                                         default: true
                                     },
                                     fileTypes: {
-                                        type: 'array',
+                                        type: ['array', 'string'],
                                         items: { type: 'string' },
-                                        description: 'List of file extensions to include WITHOUT dots (e.g. ["ts", "js", "py"]). Empty array means all files.',
+                                        description: 'File extension(s) to include WITHOUT dots (e.g. ["ts", "js", "py"] or just "ts"). Empty/undefined means all files.',
                                         default: []
                                     },
                                     chunkNumber: {
@@ -385,10 +394,49 @@ class FileContextServer {
                                         default: true
                                     },
                                     fileTypes: {
-                                        type: 'array',
+                                        type: ['array', 'string'],
                                         items: { type: 'string' },
-                                        description: 'List of file extensions to include WITHOUT dots (e.g. ["ts", "js", "py"]). Empty array means all files.',
+                                        description: 'File extension(s) to include WITHOUT dots (e.g. ["ts", "js", "py"] or just "ts"). Empty/undefined means all files.',
                                         default: []
+                                    }
+                                },
+                                required: ['path']
+                            }
+                        },
+                        set_profile: {
+                            description: 'Set the active profile for context generation. Available profiles: code (default), code-prompt (includes LLM instructions), code-file (saves to file)',
+                            inputSchema: {
+                                type: 'object',
+                                properties: {
+                                    profile_name: {
+                                        type: 'string',
+                                        description: 'Name of the profile to activate'
+                                    }
+                                },
+                                required: ['profile_name']
+                            }
+                        },
+                        get_profile_context: {
+                            description: 'Get repository context based on current profile settings. Includes directory structure, file contents, and code outlines based on profile configuration.',
+                            inputSchema: {
+                                type: 'object',
+                                properties: {
+                                    refresh: {
+                                        type: 'boolean',
+                                        description: 'Whether to refresh file selection before generating context',
+                                        default: false
+                                    }
+                                }
+                            }
+                        },
+                        generate_outline: {
+                            description: 'Generate a code outline for a file, showing its structure (classes, functions, imports, etc). Supports TypeScript/JavaScript and Python files.',
+                            inputSchema: {
+                                type: 'object',
+                                properties: {
+                                    path: {
+                                        type: 'string',
+                                        description: 'Path to the file to analyze'
                                     }
                                 },
                                 required: ['path']
@@ -494,12 +542,30 @@ class FileContextServer {
     private async getFileMetadata(filePath: string): Promise<FileMetadata> {
         try {
             const stats = await fs.stat(filePath);
+            const ext = path.extname(filePath).slice(1);
+            const language = this.getLanguageFromExtension(ext);
+
+            let analysis = null;
+            if (language) {
+                const content = await fs.readFile(filePath, 'utf8');
+                analysis = await this.codeAnalysisService.analyzeCode(content, language);
+            }
+
             return {
                 size: stats.size,
                 mimeType: mime.lookup(filePath) || 'application/octet-stream',
                 modifiedTime: stats.mtime.toISOString(),
                 createdTime: stats.birthtime.toISOString(),
-                isDirectory: stats.isDirectory()
+                isDirectory: stats.isDirectory(),
+                lastAnalyzed: new Date().toISOString(),
+                ...(analysis && {
+                    metrics: {
+                        linesOfCode: analysis.complexity_metrics.linesOfCode,
+                        numberOfFunctions: analysis.complexity_metrics.numberOfFunctions,
+                        cyclomaticComplexity: analysis.complexity_metrics.cyclomaticComplexity,
+                        maintainabilityIndex: analysis.complexity_metrics.maintainabilityIndex
+                    }
+                })
             };
         } catch (error) {
             throw new FileOperationError(
@@ -525,7 +591,7 @@ class FileContextServer {
                 ignore.push('**/*.meta');
             }
 
-            const result = await glob(globPattern, {
+            const result = await globAsync(globPattern, {
                 ...options,
                 ignore,
                 withFileTypes: false,
@@ -698,11 +764,17 @@ class FileContextServer {
         encoding: BufferEncoding = 'utf8',
         maxSize?: number,
         recursive: boolean = true,
-        fileTypes?: string[]
+        fileTypes?: string[] | string
     ): Promise<FilesInfo> {
         const filesInfo: FilesInfo = {};
         const absolutePath = path.resolve(filePath);
-        const cleanFileTypes = fileTypes?.map(ext => ext.toLowerCase().replace(/^\./, ''));
+        const cleanFileTypes = Array.isArray(fileTypes)
+            ? fileTypes.map(ext => ext.toLowerCase().replace(/^\./, ''))
+            : fileTypes
+                ? [fileTypes.toLowerCase().replace(/^\./, '')]
+                : undefined;
+
+        console.error('[FileContextServer] Reading content with fileTypes:', cleanFileTypes);
 
         // Handle single file
         if ((await fs.stat(absolutePath)).isFile()) {
@@ -903,8 +975,310 @@ class FileContextServer {
         }
     }
 
+    private async handleSetProfile(args: any) {
+        const { profile_name } = args;
+        console.error(`[FileContextServer] Setting profile: ${profile_name}`);
+        try {
+            await this.profileService.setProfile(profile_name);
+            const response = {
+                message: `Successfully switched to profile: ${profile_name}`,
+                timestamp: Date.now()
+            };
+            console.error('[FileContextServer] Profile set successfully:', response);
+            return this.createJsonResponse(response);
+        } catch (error) {
+            console.error('[FileContextServer] Failed to set profile:', error);
+            throw new McpError(
+                ErrorCode.InvalidParams,
+                `Failed to set profile: ${error instanceof Error ? error.message : 'Unknown error'}`
+            );
+        }
+    }
+
+    private async handleGetProfileContext(args: any) {
+        const { refresh = false } = args;
+        console.error(`[FileContextServer] Getting profile context (refresh: ${refresh})`);
+        try {
+            if (refresh) {
+                console.error('[FileContextServer] Refreshing file selection');
+                const profile = this.profileService.getProfile();
+                console.error('[FileContextServer] Current profile:', profile);
+                const fullFiles = await this.getFilteredFiles(profile.gitignores.full_files, profile.only_includes.full_files);
+                const outlineFiles = await this.getFilteredFiles(profile.gitignores.outline_files, profile.only_includes.outline_files);
+                console.error(`[FileContextServer] Found ${fullFiles.length} full files and ${outlineFiles.length} outline files`);
+                await this.profileService.updateFileSelection(fullFiles, outlineFiles);
+            }
+
+            const spec = this.profileService.getContextSpec();
+            const state = this.profileService.getState();
+            console.error('[FileContextServer] Current state:', state);
+
+            // Generate context based on profile settings
+            const files = await this.readFiles(state.full_files);
+            const outlines = await this.generateOutlines(state.outline_files);
+            const structure = await this.generateStructure(spec.profile.settings.no_media);
+
+            // Get prompt if profile specifies it
+            let prompt = '';
+            if (spec.profile.prompt) {
+                prompt = await this.templateService.getPrompt();
+            }
+
+            // Enhanced context with LLM-friendly metadata
+            const context = {
+                project_name: path.basename(process.cwd()),
+                project_root: process.cwd(),
+                timestamp: new Date(state.timestamp).toISOString(),
+                profile: {
+                    name: spec.profile.name,
+                    description: spec.profile.description || 'Default profile settings',
+                    settings: spec.profile.settings
+                },
+                stats: {
+                    total_files: files.length + outlines.length,
+                    full_content_files: files.length,
+                    outline_files: outlines.length,
+                    excluded_files: state.excluded_files?.length || 0
+                },
+                prompt,
+                files: files.map(f => ({
+                    ...f,
+                    language: path.extname(f.path).slice(1) || 'text',
+                    metadata: {
+                        ...f.metadata,
+                        relative_path: path.relative(process.cwd(), f.path),
+                        file_type: this.getFileType(f.path),
+                        last_modified_relative: this.getRelativeTime(new Date(f.metadata.modifiedTime))
+                    }
+                })),
+                highlights: outlines.map(o => ({
+                    ...o,
+                    metadata: {
+                        ...o.metadata,
+                        relative_path: path.relative(process.cwd(), o.path),
+                        file_type: this.getFileType(o.path),
+                        last_modified_relative: this.getRelativeTime(new Date(o.metadata.modifiedTime))
+                    }
+                })),
+                folder_structure_diagram: structure,
+                tools: {
+                    file_access: {
+                        name: 'lc-get-files',
+                        description: 'Retrieve specific file contents',
+                        example: { path: process.cwd(), files: ['example/path/file.ts'] }
+                    },
+                    search: {
+                        name: 'search_context',
+                        description: 'Search for patterns in files',
+                        example: { pattern: 'searchTerm', path: process.cwd() }
+                    },
+                    changes: {
+                        name: 'lc-list-modified-files',
+                        description: 'Track file changes since context generation',
+                        example: { timestamp: state.timestamp }
+                    }
+                }
+            };
+
+            const rendered = await this.templateService.render('context', context);
+            console.error('[FileContextServer] Generated context successfully');
+
+            return this.createJsonResponse({
+                content: rendered,
+                metadata: {
+                    timestamp: context.timestamp,
+                    profile: context.profile,
+                    stats: context.stats
+                }
+            });
+        } catch (error) {
+            console.error('[FileContextServer] Failed to generate context:', error);
+            throw new McpError(
+                ErrorCode.InternalError,
+                `Failed to generate context: ${error instanceof Error ? error.message : 'Unknown error'}`
+            );
+        }
+    }
+
+    private getFileType(filePath: string): string {
+        const ext = path.extname(filePath).toLowerCase();
+        const filename = path.basename(filePath).toLowerCase();
+
+        // Common file type mappings
+        const typeMap: Record<string, string> = {
+            '.ts': 'TypeScript',
+            '.js': 'JavaScript',
+            '.py': 'Python',
+            '.json': 'JSON',
+            '.md': 'Markdown',
+            '.txt': 'Text',
+            '.html': 'HTML',
+            '.css': 'CSS',
+            '.scss': 'SCSS',
+            '.less': 'LESS',
+            '.xml': 'XML',
+            '.yaml': 'YAML',
+            '.yml': 'YAML',
+            '.sh': 'Shell',
+            '.bash': 'Shell',
+            '.zsh': 'Shell',
+            '.fish': 'Shell',
+            '.sql': 'SQL',
+            '.env': 'Environment',
+            'dockerfile': 'Docker',
+            '.dockerignore': 'Docker',
+            '.gitignore': 'Git',
+            'package.json': 'NPM',
+            'tsconfig.json': 'TypeScript Config',
+            '.eslintrc': 'ESLint Config',
+            '.prettierrc': 'Prettier Config'
+        };
+
+        // Check for exact filename matches first
+        if (typeMap[filename]) {
+            return typeMap[filename];
+        }
+
+        // Then check extensions
+        return typeMap[ext] || 'Unknown';
+    }
+
+    private getRelativeTime(date: Date): string {
+        const now = new Date();
+        const diffMs = now.getTime() - date.getTime();
+        const diffSecs = Math.round(diffMs / 1000);
+        const diffMins = Math.round(diffSecs / 60);
+        const diffHours = Math.round(diffMins / 60);
+        const diffDays = Math.round(diffHours / 24);
+
+        if (diffSecs < 60) return `${diffSecs} seconds ago`;
+        if (diffMins < 60) return `${diffMins} minutes ago`;
+        if (diffHours < 24) return `${diffHours} hours ago`;
+        if (diffDays < 30) return `${diffDays} days ago`;
+
+        return date.toLocaleDateString();
+    }
+
+    private async getFilteredFiles(ignorePatterns: string[], includePatterns: string[]): Promise<string[]> {
+        const allFiles: string[] = [];
+        for (const pattern of includePatterns) {
+            const files = await globAsync(pattern, {
+                ignore: ignorePatterns,
+                nodir: true,
+                dot: true
+            });
+            allFiles.push(...files);
+        }
+        return [...new Set(allFiles)];
+    }
+
+    private async readFiles(paths: string[]): Promise<FileContent[]> {
+        const files: FileContent[] = [];
+        for (const path of paths) {
+            try {
+                const metadata = await this.getFileMetadata(path);
+                const content = await this.processFile(path, metadata);
+                files.push(content);
+            } catch (error) {
+                console.error(`Error reading file ${path}:`, error);
+            }
+        }
+        return files;
+    }
+
+    private async generateOutlines(paths: string[]): Promise<FileOutline[]> {
+        const outlines: FileOutline[] = [];
+        for (const path of paths) {
+            try {
+                const metadata = await this.getFileMetadata(path);
+                const content = await this.processFile(path, metadata);
+                const analysis = await this.codeAnalysisService.analyzeCode(content.content, path);
+                outlines.push({
+                    path,
+                    outline: this.formatAnalysisOutline(path, analysis),
+                    metadata
+                });
+            } catch (error) {
+                console.error(`Error generating outline for ${path}:`, error);
+            }
+        }
+        return outlines;
+    }
+
+    private formatAnalysisOutline(filePath: string, analysis: any): string {
+        const parts: string[] = [];
+        parts.push(`File: ${path.basename(filePath)}`);
+
+        if (analysis.imports?.length) {
+            parts.push('\nImports:');
+            parts.push(analysis.imports.map((imp: string) => `  - ${imp}`).join('\n'));
+        }
+
+        if (analysis.definitions?.length) {
+            parts.push('\nDefinitions:');
+            parts.push(analysis.definitions.map((def: string) => `  - ${def}`).join('\n'));
+        }
+
+        if (analysis.complexity) {
+            parts.push(`\nComplexity: ${analysis.complexity}`);
+        }
+
+        return parts.join('\n');
+    }
+
+    private getLanguageFromExtension(ext: string): string | null {
+        const extensionMap: Record<string, string> = {
+            'py': 'python',
+            'ts': 'typescript',
+            'tsx': 'typescript',
+            'js': 'javascript',
+            'jsx': 'javascript',
+            'cs': 'csharp',
+            'go': 'go',
+            'sh': 'bash',
+            'bash': 'bash'
+        };
+        return extensionMap[ext] || null;
+    }
+
+    private async generateStructure(noMedia: boolean): Promise<string> {
+        // TODO: Implement better structure visualization
+        const state = this.profileService.getState();
+        const files = [...new Set([...state.full_files, ...state.outline_files])];
+
+        return files.map(file => {
+            const prefix = state.full_files.includes(file) ? '✓' : '○';
+            return `${prefix} ${file}`;
+        }).join('\n');
+    }
+
+    private async handleGenerateOutline(args: any) {
+        const { path: filePath } = args;
+        console.error(`[FileContextServer] Generating outline for: ${filePath}`);
+
+        try {
+            await this.validateAccess(filePath);
+            const outline = `File: ${path.basename(filePath)}
+Type: ${path.extname(filePath) || 'unknown'}
+Path: ${filePath}`;
+
+            return this.createJsonResponse({
+                path: filePath,
+                outline,
+                timestamp: new Date().toISOString()
+            });
+        } catch (error) {
+            throw this.handleFileOperationError(error, 'generate outline', filePath);
+        }
+    }
+
     async run() {
-        // Set up request handlers
+        console.error('[FileContextServer] Starting server');
+        // Initialize services
+        await this.profileService.initialize();
+        await this.templateService.initialize();
+        console.error('[FileContextServer] Services initialized');
+
         this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
             tools: [
                 {
@@ -957,9 +1331,9 @@ class FileContextServer {
                                 default: true
                             },
                             fileTypes: {
-                                type: 'array',
+                                type: ['array', 'string'],
                                 items: { type: 'string' },
-                                description: 'List of file extensions to include WITHOUT dots (e.g. ["ts", "js", "py"]). Empty array means all files.',
+                                description: 'File extension(s) to include WITHOUT dots (e.g. ["ts", "js", "py"] or just "ts"). Empty/undefined means all files.',
                                 default: []
                             },
                             chunkNumber: {
@@ -997,10 +1371,52 @@ class FileContextServer {
                                 default: true
                             },
                             fileTypes: {
-                                type: 'array',
+                                type: ['array', 'string'],
                                 items: { type: 'string' },
-                                description: 'List of file extensions to include WITHOUT dots (e.g. ["ts", "js", "py"]). Empty array means all files.',
+                                description: 'File extension(s) to include WITHOUT dots (e.g. ["ts", "js", "py"] or just "ts"). Empty/undefined means all files.',
                                 default: []
+                            }
+                        },
+                        required: ['path']
+                    }
+                },
+                {
+                    name: 'set_profile',
+                    description: 'Set the active profile for context generation',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            profile_name: {
+                                type: 'string',
+                                description: 'Name of the profile to activate'
+                            }
+                        },
+                        required: ['profile_name']
+                    }
+                },
+                {
+                    name: 'get_profile_context',
+                    description: 'Get repository context based on current profile settings',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            refresh: {
+                                type: 'boolean',
+                                description: 'Whether to refresh file selection before generating context',
+                                default: false
+                            }
+                        }
+                    }
+                },
+                {
+                    name: 'generate_outline',
+                    description: 'Generate a code outline for a file, showing its structure (classes, functions, imports, etc). Supports TypeScript/JavaScript and Python files.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            path: {
+                                type: 'string',
+                                description: 'Path to the file to analyze'
                             }
                         },
                         required: ['path']
@@ -1024,6 +1440,12 @@ class FileContextServer {
                         return await this.handleSearchFiles(request);
                     case 'get_chunk_count':
                         return await this.handleGetChunkCount(request.params.arguments);
+                    case 'set_profile':
+                        return await this.handleSetProfile(request.params.arguments);
+                    case 'get_profile_context':
+                        return await this.handleGetProfileContext(request.params.arguments);
+                    case 'generate_outline':
+                        return await this.handleGenerateOutline(request.params.arguments);
                     default:
                         throw new McpError(
                             ErrorCode.MethodNotFound,
