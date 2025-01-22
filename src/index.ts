@@ -265,7 +265,7 @@ class FileContextServer {
                 capabilities: {
                     tools: {
                         list_context_files: {
-                            description: 'List files in a directory with detailed metadata',
+                            description: 'List files in a directory with detailed metadata. Automatically ignores common artifact directories and files like node_modules, .git, etc. Returns file metadata including size, mime type, and modification times.',
                             inputSchema: {
                                 type: 'object',
                                 properties: {
@@ -275,12 +275,12 @@ class FileContextServer {
                                     },
                                     recursive: {
                                         type: 'boolean',
-                                        description: 'Whether to list files recursively',
+                                        description: 'Whether to list files recursively (includes subdirectories)',
                                         default: false
                                     },
                                     includeHidden: {
                                         type: 'boolean',
-                                        description: 'Whether to include hidden files',
+                                        description: 'Whether to include hidden files (starting with .)',
                                         default: false
                                     }
                                 },
@@ -288,53 +288,43 @@ class FileContextServer {
                             }
                         },
                         read_context: {
-                            description: 'Read file or directory contents with metadata',
+                            description: 'Read and analyze code files with advanced filtering and chunking. The server automatically ignores common artifact directories and files:\n- Version Control: .git/\n- Python: .venv/, __pycache__/, *.pyc, etc.\n- JavaScript/Node.js: node_modules/, bower_components/, .next/, dist/, etc.\n- IDE/Editor: .idea/, .vscode/, .env, etc.\n\nFor large files or directories, use get_chunk_count first to determine total chunks, then request specific chunks using chunkNumber parameter.',
                             inputSchema: {
                                 type: 'object',
                                 properties: {
                                     path: {
                                         type: 'string',
-                                        description: 'Path to read'
+                                        description: 'Path to file or directory to read'
                                     },
                                     maxSize: {
                                         type: 'number',
-                                        description: 'Maximum file size to read (in bytes)',
+                                        description: 'Maximum file size in bytes. Files larger than this will be chunked.',
                                         default: 1048576
                                     },
                                     encoding: {
                                         type: 'string',
-                                        description: 'File encoding',
+                                        description: 'File encoding (e.g., utf8, ascii, latin1)',
                                         default: 'utf8'
                                     },
                                     recursive: {
                                         type: 'boolean',
-                                        description: 'Whether to read directories recursively',
+                                        description: 'Whether to read directories recursively (includes subdirectories)',
                                         default: true
-                                    },
-                                    offset: {
-                                        type: 'number',
-                                        description: 'Starting index for pagination',
-                                        default: 0
-                                    },
-                                    limit: {
-                                        type: 'number',
-                                        description: 'Maximum number of entries to return',
-                                        default: 100
                                     },
                                     fileTypes: {
                                         type: 'array',
                                         items: { type: 'string' },
-                                        description: 'File extensions to include (e.g. ["ts", "js"])',
+                                        description: 'List of file extensions to include WITHOUT dots (e.g. ["ts", "js", "py"]). Empty array means all files.',
                                         default: []
                                     },
                                     includeHidden: {
                                         type: 'boolean',
-                                        description: 'Whether to include hidden files',
+                                        description: 'Whether to include hidden files (starting with .)',
                                         default: false
                                     },
                                     chunkNumber: {
                                         type: 'number',
-                                        description: 'Chunk number to read (0-based). If specified, will return only that chunk.',
+                                        description: 'Which chunk to return (0-based). Use with get_chunk_count to handle large files/directories.',
                                         default: 0
                                     }
                                 },
@@ -375,19 +365,35 @@ class FileContextServer {
                                 required: ['pattern', 'path']
                             }
                         },
-                        get_chunk_info: {
-                            description: 'Get information about file chunks',
+                        get_chunk_count: {
+                            description: 'Get the total number of chunks that will be returned for a read_context request.\nUse this tool FIRST before reading content to determine how many chunks you need to request.\nThe parameters should match what you\'ll use in read_context.\n\nExample workflow:\n1. Call get_chunk_count first to get total_chunks\n2. Then call read_context total_chunks times with chunk_number from 0 to total_chunks-1\n\nCommon artifact directories (node_modules, .venv, etc.) and files are automatically ignored.\nAdditional patterns from .gitignore files are also respected.',
                             inputSchema: {
                                 type: 'object',
                                 properties: {
                                     path: {
                                         type: 'string',
-                                        description: 'Path to the file'
+                                        description: 'Path to file or directory'
                                     },
-                                    chunkSize: {
+                                    encoding: {
+                                        type: 'string',
+                                        description: 'File encoding (e.g., utf8, ascii, latin1)',
+                                        default: 'utf8'
+                                    },
+                                    maxSize: {
                                         type: 'number',
-                                        description: 'Size of each chunk in bytes',
+                                        description: 'Maximum file size in bytes. Files larger than this will be chunked.',
                                         default: 1048576
+                                    },
+                                    recursive: {
+                                        type: 'boolean',
+                                        description: 'Whether to read directories recursively (includes subdirectories)',
+                                        default: true
+                                    },
+                                    fileTypes: {
+                                        type: 'array',
+                                        items: { type: 'string' },
+                                        description: 'List of file extensions to include WITHOUT dots (e.g. ["ts", "js", "py"]). Empty array means all files.',
+                                        default: []
                                     }
                                 },
                                 required: ['path']
@@ -882,7 +888,7 @@ class FileContextServer {
             tools: [
                 {
                     name: 'list_context_files',
-                    description: 'List files in a directory with detailed metadata',
+                    description: 'List files in a directory with detailed metadata. Automatically ignores common artifact directories and files like node_modules, .git, etc. Returns file metadata including size, mime type, and modification times.',
                     inputSchema: {
                         type: 'object',
                         properties: {
@@ -892,12 +898,12 @@ class FileContextServer {
                             },
                             recursive: {
                                 type: 'boolean',
-                                description: 'Whether to list files recursively',
+                                description: 'Whether to list files recursively (includes subdirectories)',
                                 default: false
                             },
                             includeHidden: {
                                 type: 'boolean',
-                                description: 'Whether to include hidden files',
+                                description: 'Whether to include hidden files (starting with .)',
                                 default: false
                             }
                         },
@@ -906,43 +912,43 @@ class FileContextServer {
                 },
                 {
                     name: 'read_context',
-                    description: 'Read file or directory contents with metadata',
+                    description: 'Read and analyze code files with advanced filtering and chunking. The server automatically ignores common artifact directories and files:\n- Version Control: .git/\n- Python: .venv/, __pycache__/, *.pyc, etc.\n- JavaScript/Node.js: node_modules/, bower_components/, .next/, dist/, etc.\n- IDE/Editor: .idea/, .vscode/, .env, etc.\n\nFor large files or directories, use get_chunk_count first to determine total chunks, then request specific chunks using chunkNumber parameter.',
                     inputSchema: {
                         type: 'object',
                         properties: {
                             path: {
                                 type: 'string',
-                                description: 'Path to read'
+                                description: 'Path to file or directory to read'
                             },
                             maxSize: {
                                 type: 'number',
-                                description: 'Maximum file size to read (in bytes)',
+                                description: 'Maximum file size in bytes. Files larger than this will be chunked.',
                                 default: 1048576
                             },
                             encoding: {
                                 type: 'string',
-                                description: 'File encoding',
+                                description: 'File encoding (e.g., utf8, ascii, latin1)',
                                 default: 'utf8'
                             },
                             recursive: {
                                 type: 'boolean',
-                                description: 'Whether to read directories recursively',
+                                description: 'Whether to read directories recursively (includes subdirectories)',
                                 default: true
                             },
                             fileTypes: {
                                 type: 'array',
                                 items: { type: 'string' },
-                                description: 'File extensions to include (e.g. ["ts", "js"])',
+                                description: 'List of file extensions to include WITHOUT dots (e.g. ["ts", "js", "py"]). Empty array means all files.',
                                 default: []
                             },
                             includeHidden: {
                                 type: 'boolean',
-                                description: 'Whether to include hidden files',
+                                description: 'Whether to include hidden files (starting with .)',
                                 default: false
                             },
                             chunkNumber: {
                                 type: 'number',
-                                description: 'Chunk number to read (0-based). If specified, will return only that chunk.',
+                                description: 'Which chunk to return (0-based). Use with get_chunk_count to handle large files/directories.',
                                 default: 0
                             }
                         },
@@ -951,7 +957,7 @@ class FileContextServer {
                 },
                 {
                     name: 'get_chunk_count',
-                    description: 'Get the total number of chunks for a file or directory',
+                    description: 'Get the total number of chunks that will be returned for a read_context request.\nUse this tool FIRST before reading content to determine how many chunks you need to request.\nThe parameters should match what you\'ll use in read_context.\n\nExample workflow:\n1. Call get_chunk_count first to get total_chunks\n2. Then call read_context total_chunks times with chunk_number from 0 to total_chunks-1\n\nCommon artifact directories (node_modules, .venv, etc.) and files are automatically ignored.\nAdditional patterns from .gitignore files are also respected.',
                     inputSchema: {
                         type: 'object',
                         properties: {
@@ -961,23 +967,23 @@ class FileContextServer {
                             },
                             encoding: {
                                 type: 'string',
-                                description: 'File encoding',
+                                description: 'File encoding (e.g., utf8, ascii, latin1)',
                                 default: 'utf8'
                             },
                             maxSize: {
                                 type: 'number',
-                                description: 'Maximum file size in bytes',
+                                description: 'Maximum file size in bytes. Files larger than this will be chunked.',
                                 default: 1048576
                             },
                             recursive: {
                                 type: 'boolean',
-                                description: 'Whether to read directories recursively',
+                                description: 'Whether to read directories recursively (includes subdirectories)',
                                 default: true
                             },
                             fileTypes: {
                                 type: 'array',
                                 items: { type: 'string' },
-                                description: 'File extensions to include (e.g. ["ts", "js"])',
+                                description: 'List of file extensions to include WITHOUT dots (e.g. ["ts", "js", "py"]). Empty array means all files.',
                                 default: []
                             }
                         },
