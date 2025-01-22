@@ -115,7 +115,7 @@ class FileContextServer {
     private server: Server;
     private fileWatcherService: FileWatcherService;
     private config: StreamConfig;
-    private cachedDirectories: Map<string, FilesInfo>;
+    private fileContentCache: Map<string, { content: string; lastModified: number }>;
 
     /**
      * Create standardized file content object
@@ -254,7 +254,7 @@ class FileContextServer {
     constructor(config: Partial<StreamConfig> = {}) {
         this.fileWatcherService = new FileWatcherService();
         this.config = { ...DEFAULT_CONFIG, ...config };
-        this.cachedDirectories = new Map();
+        this.fileContentCache = new Map();
 
         this.server = new Server(
             {
@@ -317,11 +317,6 @@ class FileContextServer {
                                         description: 'List of file extensions to include WITHOUT dots (e.g. ["ts", "js", "py"]). Empty array means all files.',
                                         default: []
                                     },
-                                    includeHidden: {
-                                        type: 'boolean',
-                                        description: 'Whether to include hidden files (starting with .)',
-                                        default: false
-                                    },
                                     chunkNumber: {
                                         type: 'number',
                                         description: 'Which chunk to return (0-based). Use with get_chunk_count to handle large files/directories.',
@@ -366,7 +361,7 @@ class FileContextServer {
                             }
                         },
                         get_chunk_count: {
-                            description: 'Get the total number of chunks that will be returned for a read_context request.\nUse this tool FIRST before reading content to determine how many chunks you need to request.\nThe parameters should match what you\'ll use in read_context.\n\nExample workflow:\n1. Call get_chunk_count first to get total_chunks\n2. Then call read_context total_chunks times with chunk_number from 0 to total_chunks-1\n\nCommon artifact directories (node_modules, .venv, etc.) and files are automatically ignored.\nAdditional patterns from .gitignore files are also respected.',
+                            description: 'Get the total number of chunks that will be returned for a read_context request.\nUse this tool FIRST before reading content to determine how many chunks you need to request.\nThe parameters should match what you\'ll use in read_context.',
                             inputSchema: {
                                 type: 'object',
                                 properties: {
@@ -414,9 +409,12 @@ class FileContextServer {
         // Setup file watcher event handlers
         this.fileWatcherService.on('fileChanged', async (filePath) => {
             try {
+                const stat = await fs.stat(filePath);
                 const content = await fs.readFile(filePath, 'utf8');
-                const metadata = await this.getFileMetadata(filePath);
-                await this.processFile(filePath, metadata, 'utf8');
+                this.fileContentCache.set(filePath, {
+                    content,
+                    lastModified: stat.mtimeMs
+                });
             } catch (error) {
                 console.error(`Error processing file change for ${filePath}:`, error);
             }
@@ -429,6 +427,7 @@ class FileContextServer {
     private async cleanup(): Promise<void> {
         await this.fileWatcherService.close();
         await this.server.close();
+        this.fileContentCache.clear();
     }
 
     /**
@@ -703,8 +702,6 @@ class FileContextServer {
     ): Promise<FilesInfo> {
         const filesInfo: FilesInfo = {};
         const absolutePath = path.resolve(filePath);
-
-        // Clean up file types
         const cleanFileTypes = fileTypes?.map(ext => ext.toLowerCase().replace(/^\./, ''));
 
         // Handle single file
@@ -722,12 +719,23 @@ class FileContextServer {
                 );
             }
 
-            const content = await fs.readFile(absolutePath, encoding);
-            const hash = createHash('md5').update(content).digest('hex');
+            // Check cache first
+            const cached = this.fileContentCache.get(absolutePath);
+            let content: string;
+            if (cached && cached.lastModified === stat.mtimeMs) {
+                content = cached.content;
+            } else {
+                content = await fs.readFile(absolutePath, encoding);
+                this.fileContentCache.set(absolutePath, {
+                    content,
+                    lastModified: stat.mtimeMs
+                });
+            }
 
+            const hash = createHash('md5').update(content).digest('hex');
             filesInfo[absolutePath] = {
                 path: absolutePath,
-                content: content.toString(),
+                content,
                 hash,
                 size: stat.size,
                 lastModified: stat.mtimeMs
@@ -743,26 +751,39 @@ class FileContextServer {
         const files = await this.globPromise(globPattern, {
             ignore: DEFAULT_IGNORE_PATTERNS,
             nodir: true,
-            dot: false
+            dot: false,
+            cache: true,
+            follow: false
         });
 
-        for (const file of files) {
+        await Promise.all(files.map(async (file) => {
             if (cleanFileTypes && !cleanFileTypes.some(ext => file.toLowerCase().endsWith(`.${ext}`))) {
-                continue;
+                return;
             }
 
             try {
                 const stat = await fs.stat(file);
                 if (maxSize && stat.size > maxSize) {
-                    continue;
+                    return;
                 }
 
-                const content = await fs.readFile(file, encoding);
-                const hash = createHash('md5').update(content).digest('hex');
+                // Check cache first
+                const cached = this.fileContentCache.get(file);
+                let content: string;
+                if (cached && cached.lastModified === stat.mtimeMs) {
+                    content = cached.content;
+                } else {
+                    content = await fs.readFile(file, encoding);
+                    this.fileContentCache.set(file, {
+                        content,
+                        lastModified: stat.mtimeMs
+                    });
+                }
 
+                const hash = createHash('md5').update(content).digest('hex');
                 filesInfo[file] = {
                     path: file,
-                    content: content.toString(),
+                    content,
                     hash,
                     size: stat.size,
                     lastModified: stat.mtimeMs
@@ -770,7 +791,7 @@ class FileContextServer {
             } catch (error) {
                 console.error(`Error reading ${file}:`, error);
             }
-        }
+        }));
 
         return filesInfo;
     }
@@ -941,11 +962,6 @@ class FileContextServer {
                                 description: 'List of file extensions to include WITHOUT dots (e.g. ["ts", "js", "py"]). Empty array means all files.',
                                 default: []
                             },
-                            includeHidden: {
-                                type: 'boolean',
-                                description: 'Whether to include hidden files (starting with .)',
-                                default: false
-                            },
                             chunkNumber: {
                                 type: 'number',
                                 description: 'Which chunk to return (0-based). Use with get_chunk_count to handle large files/directories.',
@@ -957,7 +973,7 @@ class FileContextServer {
                 },
                 {
                     name: 'get_chunk_count',
-                    description: 'Get the total number of chunks that will be returned for a read_context request.\nUse this tool FIRST before reading content to determine how many chunks you need to request.\nThe parameters should match what you\'ll use in read_context.\n\nExample workflow:\n1. Call get_chunk_count first to get total_chunks\n2. Then call read_context total_chunks times with chunk_number from 0 to total_chunks-1\n\nCommon artifact directories (node_modules, .venv, etc.) and files are automatically ignored.\nAdditional patterns from .gitignore files are also respected.',
+                    description: 'Get the total number of chunks that will be returned for a read_context request.\nUse this tool FIRST before reading content to determine how many chunks you need to request.\nThe parameters should match what you\'ll use in read_context.',
                     inputSchema: {
                         type: 'object',
                         properties: {
