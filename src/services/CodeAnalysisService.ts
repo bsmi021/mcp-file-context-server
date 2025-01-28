@@ -46,10 +46,35 @@ export interface FunctionMetrics {
     nestingDepth: number;
 }
 
+export interface CodeMetrics {
+    complexity: number;
+    lineCount: {
+        total: number;
+        code: number;
+        comment: number;
+        blank: number;
+    };
+    quality: {
+        longLines: number;
+        duplicateLines: number;
+        complexFunctions: number;
+    };
+    dependencies: string[];
+    imports: string[];
+    definitions: {
+        classes: string[];
+        functions: string[];
+        variables: string[];
+    };
+}
+
 export interface CodeAnalysisResult {
-    security_issues: SecurityIssue[];
-    style_violations: StyleViolation[];
-    complexity_metrics: ComplexityMetrics;
+    metrics: CodeMetrics;
+    outline: string;
+    language: string;
+    security_issues: any[];
+    style_violations: any[];
+    complexity_metrics: any;
 }
 
 interface LanguageConfig {
@@ -63,6 +88,8 @@ interface LanguageConfig {
 export class CodeAnalysisService {
     private tempDir: string;
     private languageConfigs: Record<string, LanguageConfig>;
+    private readonly LONG_LINE_THRESHOLD = 100;
+    private readonly COMPLEX_FUNCTION_THRESHOLD = 10;
 
     constructor() {
         this.tempDir = path.join(process.cwd(), '.temp');
@@ -116,43 +143,312 @@ export class CodeAnalysisService {
         await fs.mkdir(this.tempDir, { recursive: true });
     }
 
-    public async analyzeCode(code: string, language: string): Promise<CodeAnalysisResult> {
-        const config = this.languageConfigs[language.toLowerCase()];
-        if (!config) {
-            throw new Error(`Unsupported language: ${language}`);
-        }
+    public async analyzeCode(content: string, filePath: string): Promise<CodeAnalysisResult> {
+        const ext = path.extname(filePath).toLowerCase();
+        const language = this.getLanguage(ext);
 
-        const tempFile = path.join(this.tempDir, `analysis_${Date.now()}${config.extensions[0]}`);
-        await fs.writeFile(tempFile, code);
+        const metrics = await this.calculateMetrics(content, language);
+        const outline = await this.generateOutline(content, language);
 
-        try {
-            let complexityMetrics: ComplexityMetrics;
-            if (config.parser) {
-                // Use AST-based analysis for supported languages
-                const ast = config.parser(code);
-                complexityMetrics = this.analyzeAst(ast);
-            } else if (config.complexityTool) {
-                // Fall back to external tools
-                const { stdout } = await execAsync(`${config.complexityTool} ${tempFile}`);
-                complexityMetrics = this.parseComplexityOutput(stdout, config.complexityTool);
-            } else {
-                // Basic analysis for unsupported languages
-                complexityMetrics = this.getDefaultComplexityMetrics(code);
+        return {
+            metrics,
+            outline,
+            language,
+            security_issues: [],  // TODO: Implement security analysis
+            style_violations: [], // TODO: Implement style analysis
+            complexity_metrics: {
+                cyclomaticComplexity: metrics.complexity,
+                linesOfCode: metrics.lineCount.code,
+                maintainabilityIndex: 100 - (metrics.quality.longLines + metrics.quality.duplicateLines) / metrics.lineCount.total * 100
+            }
+        };
+    }
+
+    private getLanguage(ext: string): string {
+        const map: Record<string, string> = {
+            '.ts': 'typescript',
+            '.tsx': 'typescript',
+            '.js': 'javascript',
+            '.jsx': 'javascript',
+            '.py': 'python',
+            '.go': 'go',
+            '.java': 'java',
+            '.cs': 'csharp',
+            '.cpp': 'cpp',
+            '.c': 'c',
+            '.rb': 'ruby'
+        };
+        return map[ext] || 'unknown';
+    }
+
+    private async calculateMetrics(content: string, language: string): Promise<CodeMetrics> {
+        const lines = content.split('\n');
+
+        const lineCount = this.calculateLineCount(lines, language);
+        const complexity = this.calculateComplexity(content, language);
+        const quality = this.calculateQualityMetrics(lines);
+        const { imports, dependencies } = this.extractDependencies(content, language);
+        const definitions = this.extractDefinitions(content, language);
+
+        return {
+            complexity,
+            lineCount,
+            quality,
+            dependencies,
+            imports,
+            definitions
+        };
+    }
+
+    private calculateLineCount(lines: string[], language: string): CodeMetrics['lineCount'] {
+        let code = 0;
+        let comment = 0;
+        let blank = 0;
+        let inMultilineComment = false;
+
+        const commentStart = this.getCommentPatterns(language);
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+
+            if (!trimmed) {
+                blank++;
+                continue;
             }
 
-            const [securityIssues, styleViolations] = await Promise.all([
-                this.runSecurityAnalysis(tempFile, config),
-                this.runStyleAnalysis(tempFile, config)
-            ]);
+            if (inMultilineComment) {
+                comment++;
+                if (commentStart.multiEnd && trimmed.includes(commentStart.multiEnd)) {
+                    inMultilineComment = false;
+                }
+                continue;
+            }
 
-            return {
-                security_issues: securityIssues,
-                style_violations: styleViolations,
-                complexity_metrics: complexityMetrics
-            };
-        } finally {
-            await fs.unlink(tempFile).catch(() => { });
+            if (commentStart.multi && trimmed.startsWith(commentStart.multi)) {
+                comment++;
+                inMultilineComment = true;
+                continue;
+            }
+
+            if (commentStart.single.some(pattern => trimmed.startsWith(pattern))) {
+                comment++;
+            } else {
+                code++;
+            }
         }
+
+        return {
+            total: lines.length,
+            code,
+            comment,
+            blank
+        };
+    }
+
+    private calculateComplexity(content: string, language: string): number {
+        let complexity = 1;
+        const patterns = [
+            /\bif\b/g,
+            /\belse\b/g,
+            /\bwhile\b/g,
+            /\bfor\b/g,
+            /\bforeach\b/g,
+            /\bcase\b/g,
+            /\bcatch\b/g,
+            /\b\|\|\b/g,
+            /\b&&\b/g,
+            /\?/g
+        ];
+
+        patterns.forEach(pattern => {
+            const matches = content.match(pattern);
+            if (matches) {
+                complexity += matches.length;
+            }
+        });
+
+        return complexity;
+    }
+
+    private calculateQualityMetrics(lines: string[]): CodeMetrics['quality'] {
+        const longLines = lines.filter(line => line.length > this.LONG_LINE_THRESHOLD).length;
+
+        // Simple duplicate line detection
+        const lineSet = new Set<string>();
+        let duplicateLines = 0;
+        lines.forEach(line => {
+            const trimmed = line.trim();
+            if (trimmed && lineSet.has(trimmed)) {
+                duplicateLines++;
+            } else {
+                lineSet.add(trimmed);
+            }
+        });
+
+        // Count complex functions based on line count and complexity
+        const complexFunctions = this.countComplexFunctions(lines.join('\n'));
+
+        return {
+            longLines,
+            duplicateLines,
+            complexFunctions
+        };
+    }
+
+    private countComplexFunctions(content: string): number {
+        const functionMatches = content.match(/\bfunction\s+\w+\s*\([^)]*\)\s*{[^}]*}/g) || [];
+        return functionMatches.filter(func => {
+            const complexity = this.calculateComplexity(func, 'unknown');
+            return complexity > this.COMPLEX_FUNCTION_THRESHOLD;
+        }).length;
+    }
+
+    private extractDependencies(content: string, language: string): { imports: string[], dependencies: string[] } {
+        const imports: string[] = [];
+        const dependencies: string[] = [];
+
+        switch (language) {
+            case 'typescript':
+            case 'javascript':
+                const importMatches = content.match(/import\s+.*\s+from\s+['"]([^'"]+)['"]/g) || [];
+                const requireMatches = content.match(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/g) || [];
+
+                importMatches.forEach(match => {
+                    const [, path] = match.match(/from\s+['"]([^'"]+)['"]/) || [];
+                    if (path) imports.push(path);
+                });
+
+                requireMatches.forEach(match => {
+                    const [, path] = match.match(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/) || [];
+                    if (path) dependencies.push(path);
+                });
+                break;
+
+            case 'python':
+                const pythonImports = content.match(/(?:from\s+(\S+)\s+)?import\s+(\S+)(?:\s+as\s+\S+)?/g) || [];
+                pythonImports.forEach(match => {
+                    const [, from, module] = match.match(/(?:from\s+(\S+)\s+)?import\s+(\S+)/) || [];
+                    if (from) imports.push(from);
+                    if (module) imports.push(module);
+                });
+                break;
+        }
+
+        return { imports, dependencies };
+    }
+
+    private extractDefinitions(content: string, language: string): CodeMetrics['definitions'] {
+        const definitions: CodeMetrics['definitions'] = {
+            classes: [],
+            functions: [],
+            variables: []
+        };
+
+        switch (language) {
+            case 'typescript':
+            case 'javascript':
+                // Classes
+                const classMatches = content.match(/class\s+(\w+)/g) || [];
+                definitions.classes = classMatches.map(match => match.split(/\s+/)[1]);
+
+                // Functions
+                const functionMatches = content.match(/(?:function|const|let|var)\s+(\w+)\s*(?:=\s*(?:function|\([^)]*\)\s*=>)|\([^)]*\))/g) || [];
+                definitions.functions = functionMatches.map(match => {
+                    const [, name] = match.match(/(?:function|const|let|var)\s+(\w+)/) || [];
+                    return name;
+                }).filter(Boolean);
+
+                // Variables
+                const varMatches = content.match(/(?:const|let|var)\s+(\w+)\s*=/g) || [];
+                definitions.variables = varMatches.map(match => {
+                    const [, name] = match.match(/(?:const|let|var)\s+(\w+)/) || [];
+                    return name;
+                }).filter(Boolean);
+                break;
+
+            case 'python':
+                // Classes
+                const pyClassMatches = content.match(/class\s+(\w+)(?:\([^)]*\))?:/g) || [];
+                definitions.classes = pyClassMatches.map(match => {
+                    const [, name] = match.match(/class\s+(\w+)/) || [];
+                    return name;
+                }).filter(Boolean);
+
+                // Functions
+                const pyFuncMatches = content.match(/def\s+(\w+)\s*\([^)]*\):/g) || [];
+                definitions.functions = pyFuncMatches.map(match => {
+                    const [, name] = match.match(/def\s+(\w+)/) || [];
+                    return name;
+                }).filter(Boolean);
+
+                // Variables
+                const pyVarMatches = content.match(/(\w+)\s*=(?!=)/g) || [];
+                definitions.variables = pyVarMatches.map(match => {
+                    const [, name] = match.match(/(\w+)\s*=/) || [];
+                    return name;
+                }).filter(Boolean);
+                break;
+        }
+
+        return definitions;
+    }
+
+    private getCommentPatterns(language: string): { single: string[], multi?: string, multiEnd?: string } {
+        switch (language) {
+            case 'typescript':
+            case 'javascript':
+                return {
+                    single: ['//'],
+                    multi: '/*',
+                    multiEnd: '*/'
+                };
+            case 'python':
+                return {
+                    single: ['#']
+                };
+            case 'ruby':
+                return {
+                    single: ['#']
+                };
+            default:
+                return {
+                    single: ['//'],
+                    multi: '/*',
+                    multiEnd: '*/'
+                };
+        }
+    }
+
+    private async generateOutline(content: string, language: string): Promise<string> {
+        const metrics = await this.calculateMetrics(content, language);
+
+        const sections: string[] = [];
+
+        // Add imports section
+        if (metrics.imports.length > 0) {
+            sections.push('Imports:', ...metrics.imports.map(imp => `  - ${imp}`));
+        }
+
+        // Add definitions section
+        if (metrics.definitions.classes.length > 0) {
+            sections.push('\nClasses:', ...metrics.definitions.classes.map(cls => `  - ${cls}`));
+        }
+
+        if (metrics.definitions.functions.length > 0) {
+            sections.push('\nFunctions:', ...metrics.definitions.functions.map(func => `  - ${func}`));
+        }
+
+        // Add metrics section
+        sections.push('\nMetrics:',
+            `  Lines: ${metrics.lineCount.total} (${metrics.lineCount.code} code, ${metrics.lineCount.comment} comments, ${metrics.lineCount.blank} blank)`,
+            `  Complexity: ${metrics.complexity}`,
+            `  Quality Issues:`,
+            `    - ${metrics.quality.longLines} long lines`,
+            `    - ${metrics.quality.duplicateLines} duplicate lines`,
+            `    - ${metrics.quality.complexFunctions} complex functions`
+        );
+
+        return sections.join('\n');
     }
 
     private analyzeAst(ast: TSESTree.Node): ComplexityMetrics {
@@ -489,52 +785,5 @@ export class CodeAnalysisService {
         } catch {
             return [];
         }
-    }
-
-    public async generateOutline(content: FileContent): Promise<string> {
-        const analysis = await this.analyzeCode(content.content, path.extname(content.path).slice(1));
-        const parts: string[] = [];
-
-        // Add file info
-        parts.push(`File: ${path.basename(content.path)}`);
-
-        // Add complexity metrics
-        if (analysis.complexity_metrics) {
-            parts.push('\nComplexity Metrics:');
-            parts.push(`  Lines of Code: ${analysis.complexity_metrics.linesOfCode}`);
-            parts.push(`  Cyclomatic Complexity: ${analysis.complexity_metrics.cyclomaticComplexity}`);
-            parts.push(`  Maintainability Index: ${analysis.complexity_metrics.maintainabilityIndex}`);
-
-            if (analysis.complexity_metrics.functionMetrics.length > 0) {
-                parts.push('\nFunctions:');
-                analysis.complexity_metrics.functionMetrics.forEach(fn => {
-                    parts.push(`  ${fn.name}:`);
-                    parts.push(`    Lines: ${fn.startLine}-${fn.endLine}`);
-                    parts.push(`    Complexity: ${fn.complexity}`);
-                    parts.push(`    Parameters: ${fn.parameterCount}`);
-                });
-            }
-        }
-
-        // Add security issues
-        if (analysis.security_issues.length > 0) {
-            parts.push('\nSecurity Issues:');
-            analysis.security_issues.forEach(issue => {
-                parts.push(`  [${issue.severity.toUpperCase()}] ${issue.type}`);
-                if (issue.line) {
-                    parts.push(`    Line ${issue.line}: ${issue.description}`);
-                }
-            });
-        }
-
-        // Add style violations
-        if (analysis.style_violations.length > 0) {
-            parts.push('\nStyle Issues:');
-            analysis.style_violations.forEach(violation => {
-                parts.push(`  Line ${violation.line}: ${violation.message}`);
-            });
-        }
-
-        return parts.join('\n');
     }
 }

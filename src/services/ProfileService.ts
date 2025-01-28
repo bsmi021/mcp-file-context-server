@@ -1,6 +1,10 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { Profile, ProfileConfig, ProfileState, ContextSpec } from '../types.js';
+import { glob } from 'glob';
+import { promisify } from 'util';
+
+const globAsync = promisify(glob);
 
 const DEFAULT_IGNORE_PATTERNS = [
     '.git/',
@@ -19,10 +23,13 @@ export class ProfileService {
     private config: ProfileConfig;
     private state: ProfileState;
     private projectRoot: string;
+    private activeProfile: Profile | null;
+    private readonly configPath: string;
 
     constructor(projectRoot: string) {
         console.error('[ProfileService] Initializing with root:', projectRoot);
         this.projectRoot = projectRoot;
+        this.configPath = path.join(projectRoot, '.llm-context', 'config.toml');
         this.config = this.createDefaultConfig();
         this.state = {
             profile_name: 'code',
@@ -31,6 +38,7 @@ export class ProfileService {
             excluded_files: [],
             timestamp: Date.now()
         };
+        this.activeProfile = null;
     }
 
     private createDefaultConfig(): ProfileConfig {
@@ -69,6 +77,11 @@ export class ProfileService {
 
     public async initialize(): Promise<void> {
         console.error('[ProfileService] Starting initialization');
+        await this.loadConfig();
+        await this.loadState();
+    }
+
+    private async loadConfig(): Promise<void> {
         const configPath = path.join(this.projectRoot, '.llm-context');
         try {
             await fs.mkdir(configPath, { recursive: true });
@@ -87,23 +100,24 @@ export class ProfileService {
                 this.config = JSON.parse(content);
             }
 
-            // Create state file if it doesn't exist
-            const statePath = path.join(configPath, 'state.json');
-            if (!await this.fileExists(statePath)) {
-                console.error('[ProfileService] Creating default state file');
-                await fs.writeFile(statePath, JSON.stringify(this.state, null, 2));
-            } else {
-                console.error('[ProfileService] Loading existing state file');
-                const content = await fs.readFile(statePath, 'utf8');
-                this.state = JSON.parse(content);
-            }
-
             // Log available profiles
             console.error('[ProfileService] Available profiles:', Object.keys(this.config.profiles));
             console.error('[ProfileService] Current profile:', this.state.profile_name);
         } catch (error) {
             console.error('[ProfileService] Failed to initialize:', error);
             throw error;
+        }
+    }
+
+    private async loadState(): Promise<void> {
+        const statePath = path.join(this.projectRoot, '.llm-context', 'state.json');
+        if (!await this.fileExists(statePath)) {
+            console.error('[ProfileService] Creating default state file');
+            await fs.writeFile(statePath, JSON.stringify(this.state, null, 2));
+        } else {
+            console.error('[ProfileService] Loading existing state file');
+            const content = await fs.readFile(statePath, 'utf8');
+            this.state = JSON.parse(content);
         }
     }
 
@@ -174,5 +188,50 @@ export class ProfileService {
 
     public getState(): ProfileState {
         return this.state;
+    }
+
+    public async getActiveProfile(): Promise<{ profile: Profile }> {
+        if (!this.activeProfile) {
+            throw new Error('No active profile');
+        }
+        return { profile: this.activeProfile };
+    }
+
+    public async selectFiles(): Promise<void> {
+        if (!this.activeProfile) {
+            throw new Error('No active profile');
+        }
+
+        const fullFiles = await this.getFilteredFiles(
+            this.activeProfile.gitignores.full_files,
+            this.activeProfile.only_includes.full_files
+        );
+
+        const outlineFiles = await this.getFilteredFiles(
+            this.activeProfile.gitignores.outline_files,
+            this.activeProfile.only_includes.outline_files
+        );
+
+        this.state = {
+            ...this.state,
+            full_files: fullFiles,
+            outline_files: outlineFiles,
+            timestamp: Date.now()
+        };
+
+        await this.saveState();
+    }
+
+    private async getFilteredFiles(ignorePatterns: string[], includePatterns: string[]): Promise<string[]> {
+        const allFiles: string[] = [];
+        for (const pattern of includePatterns) {
+            const files = await globAsync(pattern, {
+                ignore: ignorePatterns,
+                nodir: true,
+                dot: true
+            }) as string[];
+            allFiles.push(...files);
+        }
+        return [...new Set(allFiles)];
     }
 } 

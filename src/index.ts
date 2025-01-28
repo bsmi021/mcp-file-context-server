@@ -5,20 +5,15 @@ import {
     CallToolRequestSchema,
     ErrorCode,
     ListToolsRequestSchema,
-    ListPromptsRequestSchema,
-    GetPromptRequestSchema,
-    CreateMessageRequestSchema,
     McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { promises as fs } from 'fs';
 import { createReadStream, ReadStream } from 'fs';
 import { createGzip, Gzip } from 'zlib';
 import { pipeline, Transform } from 'stream';
-import { promisify } from 'util';
-import { glob as globAsync, type GlobOptions } from 'glob';
+import { glob as globAsync } from 'glob';
 import * as path from 'path';
 import * as mime from 'mime-types';
-import * as os from 'os';
 import { createHash } from 'crypto';
 import {
     FileMetadata,
@@ -26,19 +21,14 @@ import {
     FileEntry,
     FileErrorCode,
     FileOperationError,
-    SearchOptions,
     SearchResult,
-    DirectoryContent,
-    EnhancedSearchOptions,
     FileOutline,
-    Profile,
-    ProfileState
 } from './types.js';
 import { FileWatcherService } from './services/FileWatcherService.js';
 import { ProfileService } from './services/ProfileService.js';
 import { TemplateService } from './services/TemplateService.js';
-import { CodeAnalysisService, CodeAnalysisResult } from './services/CodeAnalysisService.js';
-import LRUCache from 'lru-cache';
+import { CodeAnalysisService } from './services/CodeAnalysisService.js';
+import { LRUCache } from 'lru-cache';
 
 interface StreamConfig {
     chunkSize: number;
@@ -112,15 +102,13 @@ const DEFAULT_CONFIG: StreamConfig = {
     compressionLevel: 6
 };
 
-const glob = promisify(globAsync) as (pattern: string, options?: GlobOptions) => Promise<string[]>;
-
 class FileContextServer {
     private server: Server;
     private fileWatcherService: FileWatcherService;
     private profileService: ProfileService;
     private templateService: TemplateService;
     private config: StreamConfig;
-    private fileContentCache: Map<string, { content: string; lastModified: number }>;
+    private fileContentCache: LRUCache<string, { content: string; lastModified: number }>;
     private codeAnalysisService: CodeAnalysisService;
 
     /**
@@ -140,7 +128,7 @@ class FileContextServer {
     /**
      * Create standardized JSON response
      */
-    private createJsonResponse(data: any) {
+    private createJsonResponse(data: any): { content: { type: string; text: string }[] } {
         return {
             content: [{
                 type: 'text',
@@ -262,7 +250,10 @@ class FileContextServer {
         this.profileService = new ProfileService(process.cwd());
         this.templateService = new TemplateService(process.cwd());
         this.config = { ...DEFAULT_CONFIG, ...config };
-        this.fileContentCache = new Map();
+        this.fileContentCache = new LRUCache<string, { content: string; lastModified: number }>({
+            max: 500, // Maximum number of items to store
+            ttl: 1000 * 60 * 5 // Time to live: 5 minutes
+        });
         this.codeAnalysisService = new CodeAnalysisService();
 
         this.server = new Server(
@@ -640,7 +631,7 @@ class FileContextServer {
                 try {
                     const fullPath = path.join(dirPath, file);
                     const metadata = await this.getFileMetadata(fullPath);
-                    const fileContent = await this.processFile(fullPath, metadata, 'utf8');
+                    await this.processFile(fullPath, metadata, 'utf8');
 
                     entries.push({
                         path: fullPath,
@@ -996,26 +987,58 @@ class FileContextServer {
     }
 
     private async handleGetProfileContext(args: any) {
-        const { refresh = false } = args;
-        console.error(`[FileContextServer] Getting profile context (refresh: ${refresh})`);
         try {
-            if (refresh) {
-                console.error('[FileContextServer] Refreshing file selection');
-                const profile = this.profileService.getProfile();
-                console.error('[FileContextServer] Current profile:', profile);
-                const fullFiles = await this.getFilteredFiles(profile.gitignores.full_files, profile.only_includes.full_files);
-                const outlineFiles = await this.getFilteredFiles(profile.gitignores.outline_files, profile.only_includes.outline_files);
-                console.error(`[FileContextServer] Found ${fullFiles.length} full files and ${outlineFiles.length} outline files`);
-                await this.profileService.updateFileSelection(fullFiles, outlineFiles);
+            const { refresh = false } = args;
+            const spec = await this.profileService.getActiveProfile();
+            const state = this.profileService.getState();
+
+            if (refresh || !state.full_files) {
+                await this.profileService.selectFiles();
             }
 
-            const spec = this.profileService.getContextSpec();
-            const state = this.profileService.getState();
-            console.error('[FileContextServer] Current state:', state);
+            // Read full content files
+            const files = await Promise.all(state.full_files.map(async (path) => {
+                try {
+                    const metadata = await this.getFileMetadata(path);
+                    const content = await this.processFile(path, metadata);
+                    const analysis = await this.codeAnalysisService.analyzeCode(content.content, path);
+                    return {
+                        ...content,
+                        analysis: {
+                            metrics: analysis.metrics,
+                            complexity: analysis.complexity_metrics.cyclomaticComplexity,
+                            maintainability: analysis.complexity_metrics.maintainabilityIndex,
+                            quality_issues: analysis.metrics.quality.longLines + analysis.metrics.quality.duplicateLines + analysis.metrics.quality.complexFunctions
+                        }
+                    };
+                } catch (error) {
+                    console.error(`Error processing file ${path}:`, error);
+                    return null;
+                }
+            })).then(results => results.filter((f): f is NonNullable<typeof f> => f !== null));
 
-            // Generate context based on profile settings
-            const files = await this.readFiles(state.full_files);
-            const outlines = await this.generateOutlines(state.outline_files);
+            // Generate outlines for selected files
+            const outlines = await Promise.all(state.outline_files.map(async (path) => {
+                try {
+                    const metadata = await this.getFileMetadata(path);
+                    const content = await this.processFile(path, metadata);
+                    const analysis = await this.codeAnalysisService.analyzeCode(content.content, path);
+                    return {
+                        path,
+                        outline: analysis.outline,
+                        metadata,
+                        analysis: {
+                            metrics: analysis.metrics,
+                            complexity: analysis.complexity_metrics.cyclomaticComplexity,
+                            maintainability: analysis.complexity_metrics.maintainabilityIndex
+                        }
+                    };
+                } catch (error) {
+                    console.error(`Error generating outline for ${path}:`, error);
+                    return null;
+                }
+            })).then(results => results.filter((o): o is NonNullable<typeof o> => o !== null));
+
             const structure = await this.generateStructure(spec.profile.settings.no_media);
 
             // Get prompt if profile specifies it
@@ -1038,7 +1061,14 @@ class FileContextServer {
                     total_files: files.length + outlines.length,
                     full_content_files: files.length,
                     outline_files: outlines.length,
-                    excluded_files: state.excluded_files?.length || 0
+                    excluded_files: state.excluded_files?.length || 0,
+                    code_metrics: {
+                        total_lines: files.reduce((sum, f) => sum + f.analysis.metrics.lineCount.total, 0),
+                        code_lines: files.reduce((sum, f) => sum + f.analysis.metrics.lineCount.code, 0),
+                        comment_lines: files.reduce((sum, f) => sum + f.analysis.metrics.lineCount.comment, 0),
+                        average_complexity: files.length > 0 ? files.reduce((sum, f) => sum + f.analysis.complexity, 0) / files.length : 0,
+                        quality_issues: files.reduce((sum, f) => sum + f.analysis.quality_issues, 0)
+                    }
                 },
                 prompt,
                 files: files.map(f => ({
@@ -1048,7 +1078,8 @@ class FileContextServer {
                         ...f.metadata,
                         relative_path: path.relative(process.cwd(), f.path),
                         file_type: this.getFileType(f.path),
-                        last_modified_relative: this.getRelativeTime(new Date(f.metadata.modifiedTime))
+                        last_modified_relative: this.getRelativeTime(new Date(f.metadata.modifiedTime)),
+                        analysis: f.analysis
                     }
                 })),
                 highlights: outlines.map(o => ({
@@ -1057,7 +1088,8 @@ class FileContextServer {
                         ...o.metadata,
                         relative_path: path.relative(process.cwd(), o.path),
                         file_type: this.getFileType(o.path),
-                        last_modified_relative: this.getRelativeTime(new Date(o.metadata.modifiedTime))
+                        last_modified_relative: this.getRelativeTime(new Date(o.metadata.modifiedTime)),
+                        analysis: o.analysis
                     }
                 })),
                 folder_structure_diagram: structure,
@@ -1080,22 +1112,11 @@ class FileContextServer {
                 }
             };
 
-            const rendered = await this.templateService.render('context', context);
-            console.error('[FileContextServer] Generated context successfully');
-
-            return this.createJsonResponse({
-                content: rendered,
-                metadata: {
-                    timestamp: context.timestamp,
-                    profile: context.profile,
-                    stats: context.stats
-                }
-            });
+            return this.createJsonResponse(context);
         } catch (error) {
-            console.error('[FileContextServer] Failed to generate context:', error);
             throw new McpError(
                 ErrorCode.InternalError,
-                `Failed to generate context: ${error instanceof Error ? error.message : 'Unknown error'}`
+                `Failed to get profile context: ${error instanceof Error ? error.message : 'Unknown error'}`
             );
         }
     }
@@ -1241,15 +1262,24 @@ class FileContextServer {
         return extensionMap[ext] || null;
     }
 
-    private async generateStructure(noMedia: boolean): Promise<string> {
-        // TODO: Implement better structure visualization
+    private async generateStructure(noMedia: boolean = false): Promise<string> {
         const state = this.profileService.getState();
         const files = [...new Set([...state.full_files, ...state.outline_files])];
 
-        return files.map(file => {
+        // Use noMedia parameter to filter out media files if needed
+        const filteredFiles = noMedia
+            ? files.filter(file => !this.isMediaFile(file))
+            : files;
+
+        return filteredFiles.map(file => {
             const prefix = state.full_files.includes(file) ? '✓' : '○';
             return `${prefix} ${file}`;
         }).join('\n');
+    }
+
+    private isMediaFile(filePath: string): boolean {
+        const mediaExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.mp4', '.avi', '.mov'];
+        return mediaExtensions.some(ext => filePath.toLowerCase().endsWith(ext));
     }
 
     private async handleGenerateOutline(args: any) {
