@@ -14,6 +14,7 @@
         "@modelcontextprotocol/sdk": "^1.0.0",
         "@typescript-eslint/parser": "^6.0.0",
         "@typescript-eslint/types": "^6.0.0",
+        "chokidar": "^4.0.3",
         "glob": "^10.0.0",
         "handlebars": "^4.7.8",
         "lru-cache": "^10.4.3",

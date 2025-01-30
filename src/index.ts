@@ -264,29 +264,7 @@ class FileContextServer {
             {
                 capabilities: {
                     tools: {
-                        list_context_files: {
-                            description: 'List files in a directory with detailed metadata. Automatically ignores common artifact directories and files like node_modules, .git, etc. Returns file metadata including size, mime type, and modification times.',
-                            inputSchema: {
-                                type: 'object',
-                                properties: {
-                                    path: {
-                                        type: 'string',
-                                        description: 'Directory path to list files from'
-                                    },
-                                    recursive: {
-                                        type: 'boolean',
-                                        description: 'Whether to list files recursively (includes subdirectories)',
-                                        default: false
-                                    },
-                                    includeHidden: {
-                                        type: 'boolean',
-                                        description: 'Whether to include hidden files (starting with .)',
-                                        default: false
-                                    }
-                                },
-                                required: ['path']
-                            }
-                        },
+
                         read_context: {
                             description: 'Read and analyze code files with advanced filtering and chunking. The server automatically ignores common artifact directories and files:\n- Version Control: .git/\n- Python: .venv/, __pycache__/, *.pyc, etc.\n- JavaScript/Node.js: node_modules/, bower_components/, .next/, dist/, etc.\n- IDE/Editor: .idea/, .vscode/, .env, etc.\n\nFor large files or directories, use get_chunk_count first to determine total chunks, then request specific chunks using chunkNumber parameter.',
                             inputSchema: {
@@ -1311,30 +1289,7 @@ Path: ${filePath}`;
 
         this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
             tools: [
-                {
-                    name: 'list_context_files',
-                    description: 'List files in a directory with detailed metadata. Automatically ignores common artifact directories and files like node_modules, .git, etc. Returns file metadata including size, mime type, and modification times.',
-                    inputSchema: {
-                        type: 'object',
-                        properties: {
-                            path: {
-                                type: 'string',
-                                description: 'Directory path to list files from'
-                            },
-                            recursive: {
-                                type: 'boolean',
-                                description: 'Whether to list files recursively (includes subdirectories)',
-                                default: false
-                            },
-                            includeHidden: {
-                                type: 'boolean',
-                                description: 'Whether to include hidden files (starting with .)',
-                                default: false
-                            }
-                        },
-                        required: ['path']
-                    }
-                },
+
                 {
                     name: 'read_context',
                     description: 'Read and analyze code files with advanced filtering and chunking. The server automatically ignores common artifact directories and files:\n- Version Control: .git/\n- Python: .venv/, __pycache__/, *.pyc, etc.\n- JavaScript/Node.js: node_modules/, bower_components/, .next/, dist/, etc.\n- IDE/Editor: .idea/, .vscode/, .env, etc.\n\nFor large files or directories, use get_chunk_count first to determine total chunks, then request specific chunks using chunkNumber parameter.',
