@@ -1,4 +1,5 @@
 # File Context Server
+[![smithery badge](https://smithery.ai/badge/@bsmi021/mcp-file-context-server)](https://smithery.ai/server/@bsmi021/mcp-file-context-server)
 
 A Model Context Protocol (MCP) server that provides file system context to Large Language Models (LLMs). This server enables LLMs to read, search, and analyze code files with advanced caching and real-time file watching capabilities.
 
@@ -39,6 +40,15 @@ A Model Context Protocol (MCP) server that provides file system context to Large
 
 ## Installation
 
+### Installing via Smithery
+
+To install File Context Server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@bsmi021/mcp-file-context-server):
+
+```bash
+npx -y @smithery/cli install @bsmi021/mcp-file-context-server --client claude
+```
+
+### Manual Installation
 ```bash
 npm install @modelcontextprotocol/file-context-server
 ```
