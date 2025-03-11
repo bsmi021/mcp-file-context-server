@@ -1,0 +1,13 @@
+# Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
+
+startCommand:
+  type: stdio
+  configSchema:
+    # JSON Schema defining the configuration options for the MCP.
+    type: object
+    properties: {}
+  commandFunction:
+    # A JS function that produces the CLI command based on the given config to start the MCP on stdio.
+    |-
+    (config) => ({ command: 'node', args: ['build/index.js'], env: { MAX_CACHE_SIZE: process.env.MAX_CACHE_SIZE || '1000', CACHE_TTL: process.env.CACHE_TTL || '3600000', MAX_FILE_SIZE: process.env.MAX_FILE_SIZE || '1048576' } })
+  exampleConfig: {}
