@@ -266,7 +266,7 @@ class FileContextServer {
                     tools: {
 
                         read_context: {
-                            description: 'Read and analyze code files with advanced filtering and chunking. The server automatically ignores common artifact directories and files:\n- Version Control: .git/\n- Python: .venv/, __pycache__/, *.pyc, etc.\n- JavaScript/Node.js: node_modules/, bower_components/, .next/, dist/, etc.\n- IDE/Editor: .idea/, .vscode/, .env, etc.\n\nFor large files or directories, use get_chunk_count first to determine total chunks, then request specific chunks using chunkNumber parameter.',
+                            description: 'WARNING: Run get_chunk_count first to determine total chunks, then request specific chunks using chunkNumber parameter.\nRead and analyze code files with advanced filtering and chunking. The server automatically ignores common artifact directories and files:\n- Version Control: .git/\n- Python: .venv/, __pycache__/, *.pyc, etc.\n- JavaScript/Node.js: node_modules/, bower_components/, .next/, dist/, etc.\n- IDE/Editor: .idea/, .vscode/, .env, etc.\n\n**WARNING** use get_chunk_count first to determine total chunks, then request specific chunks using chunkNumber parameter.',
                             inputSchema: {
                                 type: 'object',
                                 properties: {
@@ -339,7 +339,7 @@ class FileContextServer {
                             }
                         },
                         get_chunk_count: {
-                            description: 'Get the total number of chunks that will be returned for a read_context request.\nUse this tool FIRST before reading content to determine how many chunks you need to request.\nThe parameters should match what you\'ll use in read_context.',
+                            description: 'RUN ME ONE TIME BEFORE READING CONTENT\nGet the total number of chunks that will be returned for a read_context request.\nUse this tool FIRST before reading content to determine how many chunks you need to request.\nThe parameters should match what you\'ll use in read_context.',
                             inputSchema: {
                                 type: 'object',
                                 properties: {
@@ -547,10 +547,8 @@ class FileContextServer {
 
     private async globPromise(pattern: string, options: any): Promise<string[]> {
         try {
-            // Convert to absolute path first
+            // Always resolve to absolute path and convert to POSIX for glob compatibility
             const absolutePath = path.resolve(pattern);
-
-            // Convert to posix path for glob (always use forward slashes)
             const globPattern = absolutePath.split(path.sep).join(path.posix.sep);
             console.error(`Glob pattern: ${globPattern}`);
 
@@ -571,7 +569,7 @@ class FileContextServer {
             const paths = Array.isArray(result) ? result : [result];
             console.error(`Glob found ${paths.length} paths`);
 
-            // Convert paths back to OS-specific format
+            // Always return normalized absolute paths for file system operations
             return paths.map(entry => path.normalize(entry.toString()));
         } catch (error) {
             console.error('Glob error:', error);
@@ -591,9 +589,10 @@ class FileContextServer {
             await this.fileWatcherService.watch(dirPath);
 
             const entries: FileEntry[] = [];
-            const normalizedDirPath = path.normalize(dirPath);
+            // Always resolve and convert to POSIX for glob
+            const normalizedDirPath = path.resolve(dirPath);
             const pattern = recursive ? '**/*' : '*';
-            const globPattern = path.join(normalizedDirPath, pattern);
+            const globPattern = path.posix.join(normalizedDirPath.split(path.sep).join(path.posix.sep), pattern);
 
             console.error(`Directory path: ${normalizedDirPath}`);
             console.error(`Glob pattern: ${globPattern}`);
@@ -607,7 +606,8 @@ class FileContextServer {
 
             for (const file of files) {
                 try {
-                    const fullPath = path.join(dirPath, file);
+                    // file is already absolute and normalized
+                    const fullPath = file;
                     const metadata = await this.getFileMetadata(fullPath);
                     await this.processFile(fullPath, metadata, 'utf8');
 
@@ -785,9 +785,9 @@ class FileContextServer {
             return filesInfo;
         }
 
-        // Handle directory
+        // Handle directory: use POSIX join for glob
         const pattern = recursive ? '**/*' : '*';
-        const globPattern = path.join(absolutePath, pattern);
+        const globPattern = path.posix.join(absolutePath.split(path.sep).join(path.posix.sep), pattern);
 
         const files = await this.globPromise(globPattern, {
             ignore: DEFAULT_IGNORE_PATTERNS,
@@ -906,8 +906,10 @@ class FileContextServer {
             const matches: SearchResult['matches'] = [];
             let totalMatches = 0;
 
+            // Always resolve and convert to POSIX for glob
+            const normalizedSearchPath = path.resolve(searchPath);
             const pattern = recursive ? '**/*' : '*';
-            const globPattern = path.join(searchPath, pattern);
+            const globPattern = path.posix.join(normalizedSearchPath.split(path.sep).join(path.posix.sep), pattern);
 
             const files = await this.globPromise(globPattern, {
                 ignore: includeHidden ? [] : ['.*', '**/.*'],

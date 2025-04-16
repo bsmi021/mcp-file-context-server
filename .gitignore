@@ -112,3 +112,5 @@ dist
 
 # Local backup files
 *.bak
+
+rules/

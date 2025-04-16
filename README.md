@@ -164,3 +164,14 @@ MIT
 ## Contributing
 
 Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
+
+## Cross-Platform Path Compatibility
+
+**Note:** As of April 2025, all file and directory path handling in File Context Server has been updated for improved cross-platform compatibility (Windows, macOS, Linux):
+
+- All glob patterns use POSIX-style paths (forward slashes) internally, ensuring consistent file matching regardless of OS.
+- All file system operations (reading, writing, stat, etc.) use normalized absolute paths for reliability.
+- If you are developing or extending the server, use `path.posix.join` for glob patterns and `path.normalize` for file system access.
+- This change prevents issues with path separators and file matching on different operating systems.
+
+No changes are required for end users, but developers should follow these conventions when contributing to the project.
