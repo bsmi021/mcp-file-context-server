@@ -24,8 +24,55 @@ import {
     SearchResult,
     FileOutline,
 } from './types.js';
+import logger from './utils/logger.js';
+import { getLanguageFromExtension, getFileType, isMediaFile } from './utils/fileUtils.js';
 import { FileWatcherService } from './services/FileWatcherService.js';
 import { ProfileService } from './services/ProfileService.js';
+
+// Helper function for parsing cache configuration (exported for testing)
+export function parseCacheConfig(env: NodeJS.ProcessEnv, loggerInstance: typeof logger): { max: number; ttl: number } {
+    const defaultMaxCacheItems = 500;
+    const defaultCacheTTL = 1000 * 60 * 5; // 5 minutes
+
+    let maxCacheItems = defaultMaxCacheItems;
+    const maxCacheSizeEnv = env.MAX_CACHE_SIZE;
+    if (maxCacheSizeEnv) {
+        const parsedMax = parseInt(maxCacheSizeEnv, 10);
+        if (!isNaN(parsedMax) && parsedMax > 0) {
+            maxCacheItems = parsedMax;
+        } else {
+                loggerInstance.warn({ envVar: 'MAX_CACHE_SIZE', value: maxCacheSizeEnv, default: defaultMaxCacheItems }, `Invalid MAX_CACHE_SIZE value. Using default.`);
+        }
+    }
+
+    let cacheTTL = defaultCacheTTL;
+    const cacheTtlEnv = env.CACHE_TTL;
+    if (cacheTtlEnv) {
+        const parsedTTL = parseInt(cacheTtlEnv, 10);
+        if (!isNaN(parsedTTL) && parsedTTL > 0) {
+            cacheTTL = parsedTTL;
+        } else {
+                loggerInstance.warn({ envVar: 'CACHE_TTL', value: cacheTtlEnv, default: defaultCacheTTL }, `Invalid CACHE_TTL value. Using default.`);
+        }
+    }
+    return { max: maxCacheItems, ttl: cacheTTL };
+}
+
+// Helper function for parsing tool default max file size (exported for testing)
+export function parseToolDefaultMaxFileSize(env: NodeJS.ProcessEnv, loggerInstance: typeof logger): number {
+    const defaultMaxFileSize = 1048576; // 1MB
+    let toolDefaultMaxFileSize = defaultMaxFileSize;
+    const maxFileSizeEnv = env.MAX_FILE_SIZE;
+    if (maxFileSizeEnv) {
+        const parsedSize = parseInt(maxFileSizeEnv, 10);
+        if (!isNaN(parsedSize) && parsedSize > 0) {
+            toolDefaultMaxFileSize = parsedSize;
+        } else {
+            loggerInstance.warn({ envVar: 'MAX_FILE_SIZE', value: maxFileSizeEnv, default: defaultMaxFileSize }, `Invalid MAX_FILE_SIZE value. Using default.`);
+        }
+    }
+    return toolDefaultMaxFileSize;
+}
 import { TemplateService } from './services/TemplateService.js';
 import { CodeAnalysisService } from './services/CodeAnalysisService.js';
 import { LRUCache } from 'lru-cache';
@@ -110,6 +157,10 @@ class FileContextServer {
     private config: StreamConfig;
     private fileContentCache: LRUCache<string, { content: string; lastModified: number }>;
     private codeAnalysisService: CodeAnalysisService;
+
+    public getServer(): Server { // Added public getter for the McpServer instance
+        return this.server;
+    }
 
     /**
      * Create standardized file content object
@@ -250,11 +301,16 @@ class FileContextServer {
         this.profileService = new ProfileService(process.cwd());
         this.templateService = new TemplateService(process.cwd());
         this.config = { ...DEFAULT_CONFIG, ...config };
+
+        const cacheSettings = parseCacheConfig(process.env, logger);
         this.fileContentCache = new LRUCache<string, { content: string; lastModified: number }>({
-            max: 500, // Maximum number of items to store
-            ttl: 1000 * 60 * 5 // Time to live: 5 minutes
+            max: cacheSettings.max,
+            ttl: cacheSettings.ttl
         });
         this.codeAnalysisService = new CodeAnalysisService();
+
+        // Determine default maxSize for tools from environment variable
+        const toolDefaultMaxFileSize = parseToolDefaultMaxFileSize(process.env, logger);
 
         this.server = new Server(
             {
@@ -277,7 +333,7 @@ class FileContextServer {
                                     maxSize: {
                                         type: 'number',
                                         description: 'Maximum file size in bytes. Files larger than this will be chunked.',
-                                        default: 1048576
+                                        default: toolDefaultMaxFileSize
                                     },
                                     encoding: {
                                         type: 'string',
@@ -355,7 +411,7 @@ class FileContextServer {
                                     maxSize: {
                                         type: 'number',
                                         description: 'Maximum file size in bytes. Files larger than this will be chunked.',
-                                        default: 1048576
+                                        default: toolDefaultMaxFileSize
                                     },
                                     recursive: {
                                         type: 'boolean',
@@ -417,7 +473,7 @@ class FileContextServer {
         );
 
         // Error handling
-        this.server.onerror = (error) => console.error('[MCP Error]', error);
+        this.server.onerror = (error) => logger.error({ err: error }, '[MCP Error]');
         process.on('SIGINT', async () => {
             await this.cleanup();
             process.exit(0);
@@ -433,7 +489,7 @@ class FileContextServer {
                     lastModified: stat.mtimeMs
                 });
             } catch (error) {
-                console.error(`Error processing file change for ${filePath}:`, error);
+                logger.error({ err: error, filePath }, `Error processing file change for ${filePath}`);
             }
         });
     }
@@ -456,7 +512,7 @@ class FileContextServer {
             await fs.access(resolvedPath);
             return resolvedPath;
         } catch (error) {
-            console.error(`Access validation failed for path: ${resolvedPath}`, error);
+            logger.error({ err: error, path: resolvedPath }, `Access validation failed for path: ${resolvedPath}`);
             throw new FileOperationError(
                 FileErrorCode.INVALID_PATH,
                 `Path does not exist or is not accessible: ${resolvedPath}`,
@@ -512,7 +568,7 @@ class FileContextServer {
         try {
             const stats = await fs.stat(filePath);
             const ext = path.extname(filePath).slice(1);
-            const language = this.getLanguageFromExtension(ext);
+            const language = getLanguageFromExtension(ext); // Use imported function
 
             let analysis = null;
             if (language) {
@@ -550,7 +606,7 @@ class FileContextServer {
             // Always resolve to absolute path and convert to POSIX for glob compatibility
             const absolutePath = path.resolve(pattern);
             const globPattern = absolutePath.split(path.sep).join(path.posix.sep);
-            console.error(`Glob pattern: ${globPattern}`);
+            logger.debug({ globPattern }, `Glob pattern`);
 
             // Add .meta to ignore list if not already present
             const ignore = [...(options.ignore || [])];
@@ -567,12 +623,12 @@ class FileContextServer {
             });
 
             const paths = Array.isArray(result) ? result : [result];
-            console.error(`Glob found ${paths.length} paths`);
+            logger.debug({ count: paths.length }, `Glob found paths`);
 
             // Always return normalized absolute paths for file system operations
             return paths.map(entry => path.normalize(entry.toString()));
         } catch (error) {
-            console.error('Glob error:', error);
+            logger.error({ err: error, pattern }, 'Glob error');
             throw new FileOperationError(
                 FileErrorCode.UNKNOWN_ERROR,
                 `Glob operation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -594,15 +650,14 @@ class FileContextServer {
             const pattern = recursive ? '**/*' : '*';
             const globPattern = path.posix.join(normalizedDirPath.split(path.sep).join(path.posix.sep), pattern);
 
-            console.error(`Directory path: ${normalizedDirPath}`);
-            console.error(`Glob pattern: ${globPattern}`);
+            logger.debug({ directoryPath: normalizedDirPath, globPattern }, `Listing files`);
 
             const files = await this.globPromise(globPattern, {
                 ignore: includeHidden ? [] : ['.*', '**/.*'],
                 nodir: false,
                 dot: includeHidden
             });
-            console.error(`Found files: ${files.length}`);
+            logger.debug({ count: files.length }, "Found files for listing");
 
             for (const file of files) {
                 try {
@@ -617,7 +672,7 @@ class FileContextServer {
                         metadata,
                     });
                 } catch (error) {
-                    console.error(`Error getting metadata for ${file}: ${error}`);
+                    logger.error({ err: error, file }, `Error getting metadata for ${file} in handleListFiles`);
                 }
             }
 
@@ -743,7 +798,7 @@ class FileContextServer {
                 ? [fileTypes.toLowerCase().replace(/^\./, '')]
                 : undefined;
 
-        console.error('[FileContextServer] Reading content with fileTypes:', cleanFileTypes);
+        logger.debug({ fileTypes: cleanFileTypes, path: filePath }, '[FileContextServer] Reading content');
 
         // Handle single file
         if ((await fs.stat(absolutePath)).isFile()) {
@@ -830,7 +885,7 @@ class FileContextServer {
                     lastModified: stat.mtimeMs
                 };
             } catch (error) {
-                console.error(`Error reading ${file}:`, error);
+                logger.error({ err: error, file }, `Error reading file ${file} in readContent`);
             }
         }));
 
@@ -948,17 +1003,17 @@ class FileContextServer {
 
     private async handleSetProfile(args: any) {
         const { profile_name } = args;
-        console.error(`[FileContextServer] Setting profile: ${profile_name}`);
+        logger.info({ profileName: profile_name }, `[FileContextServer] Setting profile`);
         try {
             await this.profileService.setProfile(profile_name);
             const response = {
                 message: `Successfully switched to profile: ${profile_name}`,
                 timestamp: Date.now()
             };
-            console.error('[FileContextServer] Profile set successfully:', response);
+            logger.info({ response }, '[FileContextServer] Profile set successfully');
             return this.createJsonResponse(response);
         } catch (error) {
-            console.error('[FileContextServer] Failed to set profile:', error);
+            logger.error({ err: error, profileName: profile_name }, '[FileContextServer] Failed to set profile');
             throw new McpError(
                 ErrorCode.InvalidParams,
                 `Failed to set profile: ${error instanceof Error ? error.message : 'Unknown error'}`
@@ -992,7 +1047,7 @@ class FileContextServer {
                         }
                     };
                 } catch (error) {
-                    console.error(`Error processing file ${path}:`, error);
+                    logger.error({ err: error, filePath: path }, `Error processing file in handleGetProfileContext (full content)`);
                     return null;
                 }
             })).then(results => results.filter((f): f is NonNullable<typeof f> => f !== null));
@@ -1014,7 +1069,7 @@ class FileContextServer {
                         }
                     };
                 } catch (error) {
-                    console.error(`Error generating outline for ${path}:`, error);
+                    logger.error({ err: error, filePath: path }, `Error generating outline in handleGetProfileContext`);
                     return null;
                 }
             })).then(results => results.filter((o): o is NonNullable<typeof o> => o !== null));
@@ -1057,7 +1112,7 @@ class FileContextServer {
                     metadata: {
                         ...f.metadata,
                         relative_path: path.relative(process.cwd(), f.path),
-                        file_type: this.getFileType(f.path),
+                        file_type: getFileType(f.path), // Use imported function
                         last_modified_relative: this.getRelativeTime(new Date(f.metadata.modifiedTime)),
                         analysis: f.analysis
                     }
@@ -1067,7 +1122,7 @@ class FileContextServer {
                     metadata: {
                         ...o.metadata,
                         relative_path: path.relative(process.cwd(), o.path),
-                        file_type: this.getFileType(o.path),
+                        file_type: getFileType(o.path), // Use imported function
                         last_modified_relative: this.getRelativeTime(new Date(o.metadata.modifiedTime)),
                         analysis: o.analysis
                     }
@@ -1101,49 +1156,8 @@ class FileContextServer {
         }
     }
 
-    private getFileType(filePath: string): string {
-        const ext = path.extname(filePath).toLowerCase();
-        const filename = path.basename(filePath).toLowerCase();
-
-        // Common file type mappings
-        const typeMap: Record<string, string> = {
-            '.ts': 'TypeScript',
-            '.js': 'JavaScript',
-            '.py': 'Python',
-            '.json': 'JSON',
-            '.md': 'Markdown',
-            '.txt': 'Text',
-            '.html': 'HTML',
-            '.css': 'CSS',
-            '.scss': 'SCSS',
-            '.less': 'LESS',
-            '.xml': 'XML',
-            '.yaml': 'YAML',
-            '.yml': 'YAML',
-            '.sh': 'Shell',
-            '.bash': 'Shell',
-            '.zsh': 'Shell',
-            '.fish': 'Shell',
-            '.sql': 'SQL',
-            '.env': 'Environment',
-            'dockerfile': 'Docker',
-            '.dockerignore': 'Docker',
-            '.gitignore': 'Git',
-            'package.json': 'NPM',
-            'tsconfig.json': 'TypeScript Config',
-            '.eslintrc': 'ESLint Config',
-            '.prettierrc': 'Prettier Config'
-        };
-
-        // Check for exact filename matches first
-        if (typeMap[filename]) {
-            return typeMap[filename];
-        }
-
-        // Then check extensions
-        return typeMap[ext] || 'Unknown';
-    }
-
+    // `getRelativeTime` might be specific enough to this class or could be a general date utility.
+    // For now, it remains here. If other utils need it, it can be moved.
     private getRelativeTime(date: Date): string {
         const now = new Date();
         const diffMs = now.getTime() - date.getTime();
@@ -1181,7 +1195,7 @@ class FileContextServer {
                 const content = await this.processFile(path, metadata);
                 files.push(content);
             } catch (error) {
-                console.error(`Error reading file ${path}:`, error);
+                logger.error({ err: error, filePath: path }, `Error reading file in readFiles utility`);
             }
         }
         return files;
@@ -1200,7 +1214,7 @@ class FileContextServer {
                     metadata
                 });
             } catch (error) {
-                console.error(`Error generating outline for ${path}:`, error);
+                logger.error({ err: error, filePath: path }, `Error generating outline in generateOutlines utility`);
             }
         }
         return outlines;
@@ -1246,9 +1260,8 @@ class FileContextServer {
         const state = this.profileService.getState();
         const files = [...new Set([...state.full_files, ...state.outline_files])];
 
-        // Use noMedia parameter to filter out media files if needed
         const filteredFiles = noMedia
-            ? files.filter(file => !this.isMediaFile(file))
+            ? files.filter(file => isMediaFile(file))
             : files;
 
         return filteredFiles.map(file => {
@@ -1264,7 +1277,7 @@ class FileContextServer {
 
     private async handleGenerateOutline(args: any) {
         const { path: filePath } = args;
-        console.error(`[FileContextServer] Generating outline for: ${filePath}`);
+        logger.info({ filePath }, `[FileContextServer] Generating outline for`);
 
         try {
             await this.validateAccess(filePath);
@@ -1283,11 +1296,17 @@ Path: ${filePath}`;
     }
 
     async run() {
-        console.error('[FileContextServer] Starting server');
+        logger.info('[FileContextServer] Starting server');
         // Initialize services
         await this.profileService.initialize();
         await this.templateService.initialize();
-        console.error('[FileContextServer] Services initialized');
+        logger.info('[FileContextServer] Services initialized');
+
+        // Determine default maxSize for tools from environment variable for ListToolsRequestSchema
+        // This is duplicated because ListToolsRequestSchema might be called before the server instance's tool defs are fully processed
+        // Ideally, the SDK would allow dynamic tool schema updates or a single source for these defaults.
+        // For testing purposes, we'll call the same parsing function. In a real scenario, this might share a module-level const.
+        const toolDefaultMaxFileSizeForListTools = parseToolDefaultMaxFileSize(process.env, logger);
 
         this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
             tools: [
@@ -1305,7 +1324,7 @@ Path: ${filePath}`;
                             maxSize: {
                                 type: 'number',
                                 description: 'Maximum file size in bytes. Files larger than this will be chunked.',
-                                default: 1048576
+                                default: toolDefaultMaxFileSizeForListTools
                             },
                             encoding: {
                                 type: 'string',
@@ -1350,7 +1369,7 @@ Path: ${filePath}`;
                             maxSize: {
                                 type: 'number',
                                 description: 'Maximum file size in bytes. Files larger than this will be chunked.',
-                                default: 1048576
+                                default: toolDefaultMaxFileSizeForListTools
                             },
                             recursive: {
                                 type: 'boolean',
@@ -1455,11 +1474,18 @@ Path: ${filePath}`;
 
         const transport = new StdioServerTransport();
         await this.server.connect(transport);
-        console.error('File Context MCP server running on stdio');
+        logger.info('File Context MCP server running on stdio');
     }
 }
 
-// Start the server
-const server = new FileContextServer();
-server.run().catch(console.error);
+// Start the server (for Stdio transport by default)
+export const fileContextServerInstance = new FileContextServer();
+
+// Only run the Stdio server if this file is executed directly (not imported for HTTP server)
+if (require.main === module) {
+    fileContextServerInstance.run().catch(err => {
+        logger.fatal({ err }, 'Failed to run Stdio server');
+        process.exit(1);
+    });
+}
 

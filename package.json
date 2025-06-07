@@ -7,8 +7,9 @@
     "scripts": {
         "build": "tsc",
         "start": "node dist/index.js",
+        "start:http": "node --loader ts-node/esm src/http-server.ts",
         "dev": "ts-node-esm src/index.ts",
-        "test": "jest"
+        "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest"
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.0.0",
@@ -19,12 +20,20 @@
         "handlebars": "^4.7.8",
         "lru-cache": "^10.4.3",
         "mime-types": "^2.1.35",
-        "typescript": "^5.0.0"
+        "pino": "^9.2.0",
+        "typescript": "^5.0.0",
+        "raw-body": "^2.5.2",
+        "content-type": "^1.0.5"
     },
     "devDependencies": {
         "@types/glob": "^8.1.0",
         "@types/mime-types": "^2.1.1",
+        "pino-pretty": "^11.2.1",
         "@types/node": "^20.0.0",
-        "ts-node": "^10.9.1"
+        "ts-node": "^10.9.1",
+        "ts-jest": "^29.1.5",
+        "@types/jest": "^29.5.12",
+        "cross-env": "^7.0.3",
+        "@types/content-type": "^1.1.8"
     }
 }

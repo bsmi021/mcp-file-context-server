@@ -12,6 +12,7 @@
         "sourceMap": true,
         "resolveJsonModule": true,
         "allowJs": true,
+        "isolatedModules": true,
         "paths": {
             "@typescript-eslint/*": [
                 "./node_modules/@typescript-eslint/*"
