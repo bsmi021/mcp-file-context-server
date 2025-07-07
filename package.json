@@ -23,8 +23,10 @@
     },
     "devDependencies": {
         "@types/glob": "^8.1.0",
+        "@types/jest": "^30.0.0",
         "@types/mime-types": "^2.1.1",
         "@types/node": "^20.0.0",
+        "jest": "^30.0.4",
         "ts-node": "^10.9.1"
     }
 }
