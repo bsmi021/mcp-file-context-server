@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "filePathList": {
+      "type": "array",
+      "description": "The list of file paths for the file content to return.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "fileName": {
+            "type": "string",
+            "description": "Path and file name for the file to be retrieved."
+          }
+        },
+        "required": [
+          "fileName"
+        ]
+      }
+    }
+  },
+  "required": [
+    "filePathList"
+  ]
+}
