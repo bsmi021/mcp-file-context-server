@@ -1,0 +1,11 @@
+{
+    "mcpServers": {
+        "fileContext": {
+            "command": "node",
+            "args": [
+                "C:\\Projects\\mcp-servers\\mcp-context-server\\dist\\index.js"
+            ]
+
+        }
+    }
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
     CallToolRequestSchema,
     ErrorCode,
@@ -417,7 +417,7 @@ class FileContextServer {
         );
 
         // Error handling
-        this.server.onerror = (error) => console.error('[MCP Error]', error);
+        // this.server.onerror = (error) => console.error('[MCP Error]', error);
         process.on('SIGINT', async () => {
             await this.cleanup();
             process.exit(0);
@@ -1282,6 +1282,53 @@ Path: ${filePath}`;
         }
     }
 
+    private async handleGetFiles(args: any) {
+        const { filePathList } = args;
+        console.error(`[FileContextServer] Getting files for: ${filePathList?.length || 0} files`);
+
+        if (!Array.isArray(filePathList)) {
+            throw new McpError(ErrorCode.InvalidParams, 'filePathList must be an array');
+        }
+
+        const results: any[] = [];
+
+        // Process each file, handling errors gracefully
+        for (const fileItem of filePathList) {
+            const filePath = fileItem.fileName;
+            
+            try {
+                // PATTERN: Use existing security validation
+                const resolvedPath = await this.validateAccess(filePath);
+                
+                // PATTERN: Use existing file reading methods
+                const metadata = await this.getFileMetadata(resolvedPath);
+                const { content } = await this.readFileWithEncoding(resolvedPath, 'utf8');
+                
+                // TRANSFORM: Match required response schema
+                results.push({
+                    fileName: filePath,
+                    content: content,
+                    fileSize: metadata.size,
+                    lastModifiedDateTime: metadata.modifiedTime
+                });
+            } catch (error) {
+                // GOTCHA: Don't fail entire request - log error and continue
+                console.error(`Error reading file ${filePath}:`, error);
+                
+                // Include error info in response but continue processing
+                results.push({
+                    fileName: filePath,
+                    content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                    fileSize: 0,
+                    lastModifiedDateTime: new Date().toISOString()
+                });
+            }
+        }
+
+        // PATTERN: Use existing response format method
+        return this.createJsonResponse(results);
+    }
+
     async run() {
         console.error('[FileContextServer] Starting server');
         // Initialize services
@@ -1291,7 +1338,6 @@ Path: ${filePath}`;
 
         this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
             tools: [
-
                 {
                     name: 'read_context',
                     description: 'Read and analyze code files with advanced filtering and chunking. The server automatically ignores common artifact directories and files:\n- Version Control: .git/\n- Python: .venv/, __pycache__/, *.pyc, etc.\n- JavaScript/Node.js: node_modules/, bower_components/, .next/, dist/, etc.\n- IDE/Editor: .idea/, .vscode/, .env, etc.\n\nFor large files or directories, use get_chunk_count first to determine total chunks, then request specific chunks using chunkNumber parameter.',
@@ -1408,6 +1454,31 @@ Path: ${filePath}`;
                         },
                         required: ['path']
                     }
+                },
+                {
+                    name: 'getFiles',
+                    description: 'Retrieve multiple files by their paths, returning content and metadata for each file',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            filePathList: {
+                                type: 'array',
+                                description: 'The list of file paths for the file content to return.',
+                                minItems: 1,
+                                items: {
+                                    type: 'object',
+                                    properties: {
+                                        fileName: {
+                                            type: 'string',
+                                            description: 'Path and file name for the file to be retrieved.'
+                                        }
+                                    },
+                                    required: ['fileName']
+                                }
+                            }
+                        },
+                        required: ['filePathList']
+                    }
                 }
             ]
         }));
@@ -1424,7 +1495,7 @@ Path: ${filePath}`;
                     case 'read_context':
                         return await this.handleReadFile(request.params.arguments);
                     case 'search_context':
-                        return await this.handleSearchFiles(request);
+                        return await this.handleSearchFiles(request.params.arguments);
                     case 'get_chunk_count':
                         return await this.handleGetChunkCount(request.params.arguments);
                     case 'set_profile':
@@ -1433,6 +1504,8 @@ Path: ${filePath}`;
                         return await this.handleGetProfileContext(request.params.arguments);
                     case 'generate_outline':
                         return await this.handleGenerateOutline(request.params.arguments);
+                    case 'getFiles':
+                        return await this.handleGetFiles(request.params.arguments);
                     default:
                         throw new McpError(
                             ErrorCode.MethodNotFound,

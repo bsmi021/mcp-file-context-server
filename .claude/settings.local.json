@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(source:*)",
+      "Bash(find:*)",
+      "Bash(mv:*)",
+      "Bash(mkdir:*)",
+      "Bash(tree:*)",
+      "Bash(ruff:*)",
+      "Bash(touch:*)",
+      "Bash(cat:*)",
+      "Bash(ruff check:*)",
+      "Bash(pytest:*)",
+      "Bash(python:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python3 -m pytest:*)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:modelcontextprotocol.io)",
+      "mcp__thinking__sequentialThinking",
+      "Bash(npm run build:*)",
+      "Bash(rm:*)",
+      "Bash(timeout 10s npm run dev)",
+      "Bash(timeout 5s npm run dev:*)",
+      "Bash(node:*)"
+    ],
+    "deny": []
+  }
+}
