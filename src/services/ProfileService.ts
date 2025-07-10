@@ -3,6 +3,7 @@ import * as path from 'path';
 import { Profile, ProfileConfig, ProfileState, ContextSpec } from '../types.js';
 import { glob } from 'glob';
 import { promisify } from 'util';
+import { LoggingService } from './LoggingService.js';
 
 const globAsync = promisify(glob);
 
@@ -25,9 +26,14 @@ export class ProfileService {
     private projectRoot: string;
     private activeProfile: Profile | null;
     private readonly configPath: string;
+    private logger?: LoggingService;
 
-    constructor(projectRoot: string) {
-        console.error('[ProfileService] Initializing with root:', projectRoot);
+    constructor(projectRoot: string, logger?: LoggingService) {
+        this.logger = logger;
+        this.logger?.debug('ProfileService initializing', {
+            projectRoot,
+            operation: 'profile_service_init'
+        });
         this.projectRoot = projectRoot;
         this.configPath = path.join(projectRoot, '.llm-context', 'config.toml');
         this.config = this.createDefaultConfig();
@@ -42,7 +48,9 @@ export class ProfileService {
     }
 
     private createDefaultConfig(): ProfileConfig {
-        console.error('[ProfileService] Creating default config');
+        this.logger?.debug('Creating default configuration', {
+            operation: 'create_default_config'
+        });
         const defaultProfile = this.createDefaultProfile();
         return {
             profiles: {
@@ -76,7 +84,11 @@ export class ProfileService {
     }
 
     public async initialize(): Promise<void> {
-        console.error('[ProfileService] Starting initialization');
+        await this.logger?.info('ProfileService starting initialization', {
+            projectRoot: this.projectRoot,
+            configPath: this.configPath,
+            operation: 'profile_service_init'
+        });
         await this.loadConfig();
         await this.loadState();
     }
@@ -85,26 +97,42 @@ export class ProfileService {
         const configPath = path.join(this.projectRoot, '.llm-context');
         try {
             await fs.mkdir(configPath, { recursive: true });
-            console.error('[ProfileService] Created config directory:', configPath);
+            await this.logger?.debug('Created config directory', {
+                configPath,
+                operation: 'load_config'
+            });
 
             // Create default config if it doesn't exist
             const configFile = path.join(configPath, 'config.json');
             if (!await this.fileExists(configFile)) {
-                console.error('[ProfileService] Creating default config file');
+                await this.logger?.info('Creating default config file', {
+                    configFile,
+                    operation: 'load_config'
+                });
                 const defaultConfig = this.createDefaultConfig();
                 await fs.writeFile(configFile, JSON.stringify(defaultConfig, null, 2));
                 this.config = defaultConfig;
             } else {
-                console.error('[ProfileService] Loading existing config file');
+                await this.logger?.debug('Loading existing config file', {
+                    configFile,
+                    operation: 'load_config'
+                });
                 const content = await fs.readFile(configFile, 'utf8');
                 this.config = JSON.parse(content);
             }
 
             // Log available profiles
-            console.error('[ProfileService] Available profiles:', Object.keys(this.config.profiles));
-            console.error('[ProfileService] Current profile:', this.state.profile_name);
+            await this.logger?.info('Configuration loaded successfully', {
+                availableProfiles: Object.keys(this.config.profiles),
+                currentProfile: this.state.profile_name,
+                operation: 'load_config'
+            });
         } catch (error) {
-            console.error('[ProfileService] Failed to initialize:', error);
+            await this.logger?.error('Failed to initialize configuration', error as Error, {
+                projectRoot: this.projectRoot,
+                configPath,
+                operation: 'load_config'
+            });
             throw error;
         }
     }
@@ -112,10 +140,16 @@ export class ProfileService {
     private async loadState(): Promise<void> {
         const statePath = path.join(this.projectRoot, '.llm-context', 'state.json');
         if (!await this.fileExists(statePath)) {
-            console.error('[ProfileService] Creating default state file');
+            await this.logger?.info('Creating default state file', {
+                statePath,
+                operation: 'load_state'
+            });
             await fs.writeFile(statePath, JSON.stringify(this.state, null, 2));
         } else {
-            console.error('[ProfileService] Loading existing state file');
+            await this.logger?.debug('Loading existing state file', {
+                statePath,
+                operation: 'load_state'
+            });
             const content = await fs.readFile(statePath, 'utf8');
             this.state = JSON.parse(content);
         }
@@ -131,8 +165,11 @@ export class ProfileService {
     }
 
     public async setProfile(profileName: string): Promise<void> {
-        console.error(`[ProfileService] Attempting to set profile: ${profileName}`);
-        console.error('[ProfileService] Available profiles:', Object.keys(this.config.profiles));
+        await this.logger?.info('Attempting to set profile', {
+            profileName,
+            availableProfiles: Object.keys(this.config.profiles),
+            operation: 'set_profile'
+        });
 
         if (!this.config.profiles[profileName]) {
             throw new Error(`Profile '${profileName}' does not exist. Available profiles: ${Object.keys(this.config.profiles).join(', ')}`);
@@ -145,7 +182,10 @@ export class ProfileService {
         };
 
         await this.saveState();
-        console.error(`[ProfileService] Successfully set profile to: ${profileName}`);
+        await this.logger?.info('Successfully set profile', {
+            profileName,
+            operation: 'set_profile'
+        });
     }
 
     public getContextSpec(): ContextSpec {
@@ -159,7 +199,11 @@ export class ProfileService {
     private resolveProfile(profileName: string): Profile {
         const profile = this.config.profiles[profileName];
         if (!profile) {
-            console.error(`[ProfileService] Profile ${profileName} not found, using default`);
+            this.logger?.warning('Profile not found, using default', {
+                requestedProfile: profileName,
+                defaultProfile: this.config.default_profile,
+                operation: 'resolve_profile'
+            });
             return this.config.profiles[this.config.default_profile];
         }
         return profile;
@@ -168,7 +212,11 @@ export class ProfileService {
     private async saveState(): Promise<void> {
         const statePath = path.join(this.projectRoot, '.llm-context', 'state.json');
         await fs.writeFile(statePath, JSON.stringify(this.state, null, 2));
-        console.error('[ProfileService] Saved state:', this.state);
+        await this.logger?.debug('State saved successfully', {
+            statePath,
+            state: this.state,
+            operation: 'save_state'
+        });
     }
 
     public async updateFileSelection(fullFiles: string[], outlineFiles: string[]): Promise<void> {
