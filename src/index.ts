@@ -6,6 +6,7 @@ import {
     ErrorCode,
     ListToolsRequestSchema,
     McpError,
+    SetLevelRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { promises as fs } from 'fs';
 import { createReadStream, ReadStream } from 'fs';
@@ -28,6 +29,7 @@ import { FileWatcherService } from './services/FileWatcherService.js';
 import { ProfileService } from './services/ProfileService.js';
 import { TemplateService } from './services/TemplateService.js';
 import { CodeAnalysisService } from './services/CodeAnalysisService.js';
+import { LoggingService } from './services/LoggingService.js';
 import { LRUCache } from 'lru-cache';
 
 interface StreamConfig {
@@ -104,6 +106,7 @@ const DEFAULT_CONFIG: StreamConfig = {
 
 class FileContextServer {
     private server: Server;
+    private loggingService: LoggingService;
     private fileWatcherService: FileWatcherService;
     private profileService: ProfileService;
     private templateService: TemplateService;
@@ -246,16 +249,9 @@ class FileContextServer {
     }
 
     constructor(config: Partial<StreamConfig> = {}) {
-        this.fileWatcherService = new FileWatcherService();
-        this.profileService = new ProfileService(process.cwd());
-        this.templateService = new TemplateService(process.cwd());
         this.config = { ...DEFAULT_CONFIG, ...config };
-        this.fileContentCache = new LRUCache<string, { content: string; lastModified: number }>({
-            max: 500, // Maximum number of items to store
-            ttl: 1000 * 60 * 5 // Time to live: 5 minutes
-        });
-        this.codeAnalysisService = new CodeAnalysisService();
-
+        
+        // Initialize server first
         this.server = new Server(
             {
                 name: 'file-context-server',
@@ -416,6 +412,32 @@ class FileContextServer {
             }
         );
 
+        // Initialize logging service
+        this.loggingService = new LoggingService(this.server, {
+            defaultLevel: (process.env.MCP_LOG_LEVEL as any) || 'info',
+            enableConsoleLogging: process.env.NODE_ENV === 'development',
+            loggerName: 'file-context-server',
+            performance: {
+                enabled: process.env.MCP_LOG_PERFORMANCE === 'true',
+                slowOperationThreshold: 1000
+            },
+            serialization: {
+                maxDepth: 5,
+                maxLength: 2000,
+                includeStackTrace: true
+            }
+        });
+
+        // Initialize other services with logging
+        this.fileWatcherService = new FileWatcherService();
+        this.profileService = new ProfileService(process.cwd());
+        this.templateService = new TemplateService(process.cwd());
+        this.fileContentCache = new LRUCache<string, { content: string; lastModified: number }>({
+            max: 500, // Maximum number of items to store
+            ttl: 1000 * 60 * 5 // Time to live: 5 minutes
+        });
+        this.codeAnalysisService = new CodeAnalysisService();
+
         // Error handling
         // this.server.onerror = (error) => console.error('[MCP Error]', error);
         process.on('SIGINT', async () => {
@@ -433,7 +455,10 @@ class FileContextServer {
                     lastModified: stat.mtimeMs
                 });
             } catch (error) {
-                console.error(`Error processing file change for ${filePath}:`, error);
+                await this.loggingService.error(`Error processing file change for ${filePath}`, error as Error, {
+                    filePath,
+                    operation: 'file_change_processing'
+                });
             }
         });
     }
@@ -456,7 +481,11 @@ class FileContextServer {
             await fs.access(resolvedPath);
             return resolvedPath;
         } catch (error) {
-            console.error(`Access validation failed for path: ${resolvedPath}`, error);
+            await this.loggingService.error('Access validation failed for path', error as Error, {
+                filePath: filePath,
+                resolvedPath,
+                operation: 'access_validation'
+            });
             throw new FileOperationError(
                 FileErrorCode.INVALID_PATH,
                 `Path does not exist or is not accessible: ${resolvedPath}`,
@@ -550,7 +579,12 @@ class FileContextServer {
             // Always resolve to absolute path and convert to POSIX for glob compatibility
             const absolutePath = path.resolve(pattern);
             const globPattern = absolutePath.split(path.sep).join(path.posix.sep);
-            console.error(`Glob pattern: ${globPattern}`);
+            await this.loggingService.debug('Executing glob pattern', {
+                pattern,
+                absolutePath,
+                globPattern,
+                operation: 'glob_search'
+            });
 
             // Add .meta to ignore list if not already present
             const ignore = [...(options.ignore || [])];
@@ -567,12 +601,19 @@ class FileContextServer {
             });
 
             const paths = Array.isArray(result) ? result : [result];
-            console.error(`Glob found ${paths.length} paths`);
+            await this.loggingService.debug('Glob search completed', {
+                pathCount: paths.length,
+                pattern,
+                operation: 'glob_search'
+            });
 
             // Always return normalized absolute paths for file system operations
             return paths.map(entry => path.normalize(entry.toString()));
         } catch (error) {
-            console.error('Glob error:', error);
+            await this.loggingService.error('Glob operation failed', error as Error, {
+                pattern,
+                operation: 'glob_search'
+            });
             throw new FileOperationError(
                 FileErrorCode.UNKNOWN_ERROR,
                 `Glob operation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -594,15 +635,24 @@ class FileContextServer {
             const pattern = recursive ? '**/*' : '*';
             const globPattern = path.posix.join(normalizedDirPath.split(path.sep).join(path.posix.sep), pattern);
 
-            console.error(`Directory path: ${normalizedDirPath}`);
-            console.error(`Glob pattern: ${globPattern}`);
+            await this.loggingService.debug('Starting directory listing', {
+                dirPath,
+                normalizedDirPath,
+                globPattern,
+                recursive,
+                operation: 'list_directory'
+            });
 
             const files = await this.globPromise(globPattern, {
                 ignore: includeHidden ? [] : ['.*', '**/.*'],
                 nodir: false,
                 dot: includeHidden
             });
-            console.error(`Found files: ${files.length}`);
+            await this.loggingService.debug('Directory listing completed', {
+                fileCount: files.length,
+                dirPath,
+                operation: 'list_directory'
+            });
 
             for (const file of files) {
                 try {
@@ -617,7 +667,10 @@ class FileContextServer {
                         metadata,
                     });
                 } catch (error) {
-                    console.error(`Error getting metadata for ${file}: ${error}`);
+                    await this.loggingService.error('Error getting metadata for file', error as Error, {
+                        filePath: file,
+                        operation: 'get_metadata'
+                    });
                 }
             }
 
@@ -743,7 +796,11 @@ class FileContextServer {
                 ? [fileTypes.toLowerCase().replace(/^\./, '')]
                 : undefined;
 
-        console.error('[FileContextServer] Reading content with fileTypes:', cleanFileTypes);
+        await this.loggingService.debug('Reading content with file type filtering', {
+            cleanFileTypes,
+            absolutePath,
+            operation: 'read_content'
+        });
 
         // Handle single file
         if ((await fs.stat(absolutePath)).isFile()) {
@@ -830,7 +887,10 @@ class FileContextServer {
                     lastModified: stat.mtimeMs
                 };
             } catch (error) {
-                console.error(`Error reading ${file}:`, error);
+                await this.loggingService.error('Error reading file for info collection', error as Error, {
+                    filePath: file,
+                    operation: 'get_files_info'
+                });
             }
         }));
 
@@ -948,17 +1008,27 @@ class FileContextServer {
 
     private async handleSetProfile(args: any) {
         const { profile_name } = args;
-        console.error(`[FileContextServer] Setting profile: ${profile_name}`);
+        await this.loggingService.info('Setting profile', {
+            profileName: profile_name,
+            operation: 'set_profile'
+        });
         try {
             await this.profileService.setProfile(profile_name);
             const response = {
                 message: `Successfully switched to profile: ${profile_name}`,
                 timestamp: Date.now()
             };
-            console.error('[FileContextServer] Profile set successfully:', response);
+            await this.loggingService.info('Profile set successfully', {
+                profileName: profile_name,
+                operation: 'set_profile',
+                response
+            });
             return this.createJsonResponse(response);
         } catch (error) {
-            console.error('[FileContextServer] Failed to set profile:', error);
+            await this.loggingService.error('Failed to set profile', error as Error, {
+                profileName: profile_name,
+                operation: 'set_profile'
+            });
             throw new McpError(
                 ErrorCode.InvalidParams,
                 `Failed to set profile: ${error instanceof Error ? error.message : 'Unknown error'}`
@@ -992,7 +1062,10 @@ class FileContextServer {
                         }
                     };
                 } catch (error) {
-                    console.error(`Error processing file ${path}:`, error);
+                    await this.loggingService.error('Error processing file', error as Error, {
+                        filePath: path,
+                        operation: 'get_profile_context'
+                    });
                     return null;
                 }
             })).then(results => results.filter((f): f is NonNullable<typeof f> => f !== null));
@@ -1014,7 +1087,10 @@ class FileContextServer {
                         }
                     };
                 } catch (error) {
-                    console.error(`Error generating outline for ${path}:`, error);
+                    await this.loggingService.error('Error generating outline', error as Error, {
+                        filePath: path,
+                        operation: 'get_profile_context'
+                    });
                     return null;
                 }
             })).then(results => results.filter((o): o is NonNullable<typeof o> => o !== null));
@@ -1181,7 +1257,10 @@ class FileContextServer {
                 const content = await this.processFile(path, metadata);
                 files.push(content);
             } catch (error) {
-                console.error(`Error reading file ${path}:`, error);
+                await this.loggingService.error('Error reading file', error as Error, {
+                    filePath: path,
+                    operation: 'get_files'
+                });
             }
         }
         return files;
@@ -1200,7 +1279,10 @@ class FileContextServer {
                     metadata
                 });
             } catch (error) {
-                console.error(`Error generating outline for ${path}:`, error);
+                await this.loggingService.error('Error generating outline', error as Error, {
+                    filePath: path,
+                    operation: 'generate_outlines'
+                });
             }
         }
         return outlines;
@@ -1264,7 +1346,10 @@ class FileContextServer {
 
     private async handleGenerateOutline(args: any) {
         const { path: filePath } = args;
-        console.error(`[FileContextServer] Generating outline for: ${filePath}`);
+        await this.loggingService.debug('Generating outline for file', {
+            filePath,
+            operation: 'generate_outline'
+        });
 
         try {
             await this.validateAccess(filePath);
@@ -1284,7 +1369,10 @@ Path: ${filePath}`;
 
     private async handleGetFiles(args: any) {
         const { filePathList } = args;
-        console.error(`[FileContextServer] Getting files for: ${filePathList?.length || 0} files`);
+        await this.loggingService.debug('Getting files', {
+            fileCount: filePathList?.length || 0,
+            operation: 'get_files'
+        });
 
         if (!Array.isArray(filePathList)) {
             throw new McpError(ErrorCode.InvalidParams, 'filePathList must be an array');
@@ -1313,7 +1401,10 @@ Path: ${filePath}`;
                 });
             } catch (error) {
                 // GOTCHA: Don't fail entire request - log error and continue
-                console.error(`Error reading file ${filePath}:`, error);
+                await this.loggingService.error('Error reading file', error as Error, {
+                    filePath,
+                    operation: 'get_files'
+                });
                 
                 // Include error info in response but continue processing
                 results.push({
@@ -1330,11 +1421,16 @@ Path: ${filePath}`;
     }
 
     async run() {
-        console.error('[FileContextServer] Starting server');
+        await this.loggingService.info('FileContextServer starting', {
+            operation: 'server_startup'
+        });
         // Initialize services
         await this.profileService.initialize();
         await this.templateService.initialize();
-        console.error('[FileContextServer] Services initialized');
+        await this.loggingService.info('Services initialized', {
+            operation: 'server_startup',
+            services: ['profileService', 'templateService']
+        });
 
         this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
             tools: [
@@ -1483,6 +1579,17 @@ Path: ${filePath}`;
             ]
         }));
 
+        // Handle logging level requests
+        this.server.setRequestHandler(SetLevelRequestSchema, async (request) => {
+            this.loggingService.setLevel(request.params.level);
+            await this.loggingService.info('Log level changed', { 
+                newLevel: request.params.level,
+                operation: 'log_level_change',
+                requestedBy: 'client'
+            });
+            return {};
+        });
+
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             try {
                 if (!request.params.arguments) {
@@ -1528,11 +1635,16 @@ Path: ${filePath}`;
 
         const transport = new StdioServerTransport();
         await this.server.connect(transport);
-        console.error('File Context MCP server running on stdio');
+        await this.loggingService.info('File Context MCP server running on stdio', {
+            operation: 'server_start'
+        });
     }
 }
 
 // Start the server
 const server = new FileContextServer();
-server.run().catch(console.error);
+server.run().catch((error) => {
+    console.error('Server startup failed:', error);
+    process.exit(1);
+});
 
