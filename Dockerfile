@@ -21,4 +21,4 @@ ENV CACHE_TTL=3600000
 ENV MAX_FILE_SIZE=1048576
 
 # Start the server
-CMD ["node", "build/index.js"]
+CMD ["node", "dist/index.js"]
