@@ -1,15 +1,18 @@
 import { EventEmitter } from 'events';
 import { watch } from 'chokidar';
 import * as path from 'path';
+import { LoggingService } from './LoggingService.js';
 
 /**
  * Service for monitoring file system changes
  */
 export class FileWatcherService extends EventEmitter {
     private watchers: Map<string, any> = new Map();
+    private logger?: LoggingService;
 
-    constructor() {
+    constructor(logger?: LoggingService) {
         super();
+        this.logger = logger;
     }
 
     /**
@@ -38,7 +41,10 @@ export class FileWatcherService extends EventEmitter {
             this.watchers.get(targetPath).add(targetPath);
         }
 
-        console.error(`Started watching: ${targetPath}`);
+        await this.logger?.info('Started watching path', {
+            targetPath,
+            operation: 'file_watch_start'
+        });
     }
 
     /**
@@ -48,7 +54,10 @@ export class FileWatcherService extends EventEmitter {
         if (this.watchers.has(targetPath)) {
             await this.watchers.get(targetPath).unwatch(targetPath);
             this.watchers.delete(targetPath);
-            console.error(`Stopped watching: ${targetPath}`);
+            await this.logger?.info('Stopped watching path', {
+                targetPath,
+                operation: 'file_watch_stop'
+            });
         }
     }
 
@@ -61,7 +70,9 @@ export class FileWatcherService extends EventEmitter {
                 await watcher.close();
             }
             this.watchers.clear();
-            console.error('File watcher closed');
+            await this.logger?.info('File watcher closed', {
+                operation: 'file_watch_close'
+            });
         }
     }
 
@@ -82,43 +93,69 @@ export class FileWatcherService extends EventEmitter {
 
         // File added
         watcher.on('add', (filePath: string) => {
-            console.error(`File ${filePath} has been added`);
+            this.logger?.debug('File added', {
+                filePath,
+                targetPath,
+                operation: 'file_watch_event'
+            });
             this.emit('fileAdded', filePath);
         });
 
         // File changed
         watcher.on('change', (filePath: string) => {
-            console.error(`File ${filePath} has been changed`);
+            this.logger?.debug('File changed', {
+                filePath,
+                targetPath,
+                operation: 'file_watch_event'
+            });
             this.emit('fileChanged', filePath);
         });
 
         // File deleted
         watcher.on('unlink', (filePath: string) => {
-            console.error(`File ${filePath} has been removed`);
+            this.logger?.debug('File removed', {
+                filePath,
+                targetPath,
+                operation: 'file_watch_event'
+            });
             this.emit('fileDeleted', filePath);
         });
 
         // Directory added
         watcher.on('addDir', (dirPath: string) => {
-            console.error(`Directory ${dirPath} has been added`);
+            this.logger?.debug('Directory added', {
+                dirPath,
+                targetPath,
+                operation: 'file_watch_event'
+            });
             this.emit('directoryAdded', dirPath);
         });
 
         // Directory deleted
         watcher.on('unlinkDir', (dirPath: string) => {
-            console.error(`Directory ${dirPath} has been removed`);
+            this.logger?.debug('Directory removed', {
+                dirPath,
+                targetPath,
+                operation: 'file_watch_event'
+            });
             this.emit('directoryDeleted', dirPath);
         });
 
         // Error handling
         watcher.on('error', (error: Error) => {
-            console.error(`Watcher error: ${error}`);
+            this.logger?.error('Watcher error', error, {
+                targetPath,
+                operation: 'file_watch_event'
+            });
             this.emit('error', error);
         });
 
         // Ready event
         watcher.on('ready', () => {
-            console.error('Initial scan complete. Ready for changes');
+            this.logger?.info('Initial scan complete, ready for changes', {
+                targetPath,
+                operation: 'file_watch_ready'
+            });
             this.emit('ready');
         });
     }

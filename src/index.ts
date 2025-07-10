@@ -429,14 +429,14 @@ class FileContextServer {
         });
 
         // Initialize other services with logging
-        this.fileWatcherService = new FileWatcherService();
-        this.profileService = new ProfileService(process.cwd());
-        this.templateService = new TemplateService(process.cwd());
+        this.fileWatcherService = new FileWatcherService(this.loggingService);
+        this.profileService = new ProfileService(process.cwd(), this.loggingService);
+        this.templateService = new TemplateService(process.cwd(), this.loggingService);
         this.fileContentCache = new LRUCache<string, { content: string; lastModified: number }>({
             max: 500, // Maximum number of items to store
             ttl: 1000 * 60 * 5 // Time to live: 5 minutes
         });
-        this.codeAnalysisService = new CodeAnalysisService();
+        this.codeAnalysisService = new CodeAnalysisService(this.loggingService);
 
         // Error handling
         // this.server.onerror = (error) => console.error('[MCP Error]', error);

@@ -5,6 +5,7 @@ import { promisify } from 'util';
 import * as parser from '@typescript-eslint/parser';
 import { AST_NODE_TYPES, TSESTree } from '@typescript-eslint/types';
 import { FileContent } from '../types.js';
+import { LoggingService } from './LoggingService.js';
 
 const execAsync = promisify(exec);
 
@@ -90,8 +91,10 @@ export class CodeAnalysisService {
     private languageConfigs: Record<string, LanguageConfig>;
     private readonly LONG_LINE_THRESHOLD = 100;
     private readonly COMPLEX_FUNCTION_THRESHOLD = 10;
+    private logger?: LoggingService;
 
-    constructor() {
+    constructor(logger?: LoggingService) {
+        this.logger = logger;
         this.tempDir = path.join(process.cwd(), '.temp');
         this.languageConfigs = {
             python: {
@@ -613,7 +616,12 @@ export class CodeAnalysisService {
             const { stdout } = await execAsync(`${config.securityTool} ${filePath}`);
             return this.parseSecurityOutput(stdout, config.securityTool);
         } catch (error) {
-            console.error('Security analysis failed:', error);
+            await this.logger?.warning('Security analysis failed', {
+                filePath,
+                securityTool: config.securityTool,
+                error: error instanceof Error ? error.message : String(error),
+                operation: 'security_analysis'
+            });
             return [];
         }
     }
@@ -627,7 +635,12 @@ export class CodeAnalysisService {
             const { stdout } = await execAsync(`${config.styleTool} ${filePath}`);
             return this.parseStyleOutput(stdout, config.styleTool);
         } catch (error) {
-            console.error('Style analysis failed:', error);
+            await this.logger?.warning('Style analysis failed', {
+                filePath,
+                styleTool: config.styleTool,
+                error: error instanceof Error ? error.message : String(error),
+                operation: 'style_analysis'
+            });
             return [];
         }
     }

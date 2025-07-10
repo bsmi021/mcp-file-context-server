@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import Handlebars from 'handlebars';
+import { LoggingService } from './LoggingService.js';
 
 type CompiledTemplate = ReturnType<typeof Handlebars.compile>;
 
@@ -131,8 +132,10 @@ export class TemplateService {
     private templates: Map<string, CompiledTemplate>;
     private projectRoot: string;
     private templatesDir: string;
+    private logger?: LoggingService;
 
-    constructor(projectRoot: string) {
+    constructor(projectRoot: string, logger?: LoggingService) {
+        this.logger = logger;
         this.projectRoot = projectRoot;
         this.templatesDir = path.join(projectRoot, '.llm-context', 'templates');
         this.templates = new Map();
@@ -182,7 +185,12 @@ export class TemplateService {
         try {
             return await fs.readFile(templatePath, 'utf8');
         } catch (error) {
-            console.error(`Error reading template ${name}:`, error);
+            await this.logger?.warning('Error reading template, using default', {
+                templateName: name,
+                templatePath,
+                error: error instanceof Error ? error.message : String(error),
+                operation: 'read_template'
+            });
             return DEFAULT_TEMPLATES[name];
         }
     }
@@ -196,7 +204,10 @@ export class TemplateService {
         try {
             return template(context);
         } catch (error) {
-            console.error(`Error rendering template ${templateName}:`, error);
+            await this.logger?.error('Error rendering template', error as Error, {
+                templateName,
+                operation: 'render_template'
+            });
             throw error;
         }
     }
