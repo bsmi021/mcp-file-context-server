@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import express, { Request, Response } from 'express';
+import { randomUUID } from 'node:crypto';
 import {
     CallToolRequestSchema,
     ErrorCode,
     ListToolsRequestSchema,
     McpError,
     SetLevelRequestSchema,
+    isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import { promises as fs } from 'fs';
 import { createReadStream, ReadStream } from 'fs';
@@ -407,7 +411,8 @@ class FileContextServer {
                                 required: ['path']
                             }
                         }
-                    }
+                    },
+                    logging: {}
                 }
             }
         );
@@ -1633,10 +1638,176 @@ Path: ${filePath}`;
             }
         });
 
+        // Check transport mode from environment variable
+        const transportMode = process.env.TRANSPORT_MODE?.toLowerCase();
+        
+        if (transportMode === 'http') {
+            await this.runHttpServer();
+        } else {
+            await this.runStdioServer();
+        }
+    }
+
+    private async runStdioServer() {
         const transport = new StdioServerTransport();
         await this.server.connect(transport);
         await this.loggingService.info('File Context MCP server running on stdio', {
             operation: 'server_start'
+        });
+    }
+
+    private async runHttpServer() {
+        const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+        const app = express();
+        app.use(express.json());
+
+        // Map to store transports by session ID
+        const transports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
+
+        // MCP POST endpoint
+        const mcpPostHandler = async (req: Request, res: Response) => {
+            const sessionIdHeader = req.headers['mcp-session-id'];
+            const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
+            
+            if (sessionId) {
+                console.log(`[HTTP ${sessionId}] POST /mcp from ${req.ip || req.connection?.remoteAddress || 'unknown'}`);
+            } else {
+                console.log(`[HTTP] POST /mcp from ${req.ip || req.connection?.remoteAddress || 'unknown'}`);
+            }
+
+            try {
+                let transport: StreamableHTTPServerTransport;
+                
+                if (sessionId && transports[sessionId]) {
+                    // Reuse existing transport
+                    transport = transports[sessionId];
+                    console.log(`[HTTP Routes] Found existing session: ${sessionId}`);
+                } else if (!sessionId && isInitializeRequest(req.body)) {
+                    // New initialization request
+                    transport = new StreamableHTTPServerTransport({
+                        sessionIdGenerator: () => randomUUID(),
+                        onsessioninitialized: (sessionId: string) => {
+                            console.log(`[HTTP Routes] Session initialized: ${sessionId}`);
+                            transports[sessionId] = transport;
+                        }
+                    });
+
+                    // Set up onclose handler to clean up transport when closed
+                    transport.onclose = () => {
+                        const sid = transport.sessionId;
+                        if (sid && transports[sid]) {
+                            console.log(`[HTTP Routes] Transport closed for session ${sid}, removing from transports map`);
+                            delete transports[sid];
+                        }
+                    };
+
+                    // Connect the transport to the MCP server
+                    await this.server.connect(transport);
+                    await transport.handleRequest(req, res, req.body);
+                    return; // Already handled
+                } else {
+                    // Invalid request - no session ID or not initialization request
+                    if (sessionId && !transports[sessionId]) {
+                        console.log(`[HTTP Routes] Session not found: ${sessionId}`);
+                    }
+                    res.status(sessionId ? 404 : 400).json({
+                        jsonrpc: '2.0',
+                        error: {
+                            code: -32000,
+                            message: sessionId ? 'Session not found' : 'Bad Request: No valid session ID provided',
+                        },
+                        id: null,
+                    });
+                    return;
+                }
+
+                // Handle the request with existing transport
+                await transport.handleRequest(req, res, req.body);
+            } catch (error) {
+                console.error('[HTTP Routes] Error handling MCP request:', error);
+                if (!res.headersSent) {
+                    res.status(500).json({
+                        jsonrpc: '2.0',
+                        error: {
+                            code: -32603,
+                            message: 'Internal server error',
+                        },
+                        id: null,
+                    });
+                }
+            }
+        };
+
+        // Handle GET requests for SSE streams
+        const mcpGetHandler = async (req: Request, res: Response) => {
+            const sessionIdHeader = req.headers['mcp-session-id'];
+            const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
+            if (!sessionId || !transports[sessionId]) {
+                res.status(400).send('Invalid or missing session ID');
+                return;
+            }
+
+            console.log(`[HTTP Routes] SSE stream request for session ${sessionId}`);
+            const transport = transports[sessionId];
+            await transport.handleRequest(req, res);
+        };
+
+        // Handle DELETE requests for session termination
+        const mcpDeleteHandler = async (req: Request, res: Response) => {
+            const sessionIdHeader = req.headers['mcp-session-id'];
+            const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
+            if (!sessionId || !transports[sessionId]) {
+                res.status(400).send('Invalid or missing session ID');
+                return;
+            }
+
+            console.log(`[HTTP Routes] Session termination request for session ${sessionId}`);
+            try {
+                const transport = transports[sessionId];
+                await transport.handleRequest(req, res);
+            } catch (error) {
+                console.error('[HTTP Routes] Error handling session termination:', error);
+                if (!res.headersSent) {
+                    res.status(500).send('Error processing session termination');
+                }
+            }
+        };
+
+        // Set up routes
+        app.post('/mcp', mcpPostHandler);
+        app.get('/mcp', mcpGetHandler);
+        app.delete('/mcp', mcpDeleteHandler);
+
+        // Health check endpoint
+        app.get('/health', (req: Request, res: Response) => {
+            res.json({ status: 'ok', timestamp: new Date().toISOString() });
+        });
+
+        app.listen(port, '0.0.0.0', () => {
+            console.log(`[HTTP] MCP server listening on http://0.0.0.0:${port}/mcp`);
+        });
+
+        await this.loggingService.info('File Context MCP server running on HTTP', {
+            operation: 'server_start',
+            port,
+            transport: 'http'
+        });
+
+        // Handle server shutdown
+        process.on('SIGINT', async () => {
+            console.log('[HTTP] Shutting down server...');
+            // Close all active transports
+            for (const sessionId in transports) {
+                try {
+                    console.log(`[HTTP] Closing transport for session ${sessionId}`);
+                    await transports[sessionId].close();
+                    delete transports[sessionId];
+                } catch (error) {
+                    console.error(`[HTTP] Error closing transport for session ${sessionId}:`, error);
+                }
+            }
+            console.log('[HTTP] Server shutdown complete');
+            process.exit(0);
         });
     }
 }
